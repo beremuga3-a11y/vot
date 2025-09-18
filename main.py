@@ -48,6 +48,8 @@ CHANNEL_ID = -1001234567890
 CHAT_ID = -4966660960
 CHAT_LINK = "https://t.me/+tjqmdwVMjtYxMTU6"
 CHANNEL_LINK = "https://t.me/spiderfarminfo"
+AUTUMN_CLICK_COOLDOWN = 30       # кд на осенний клик (сек)
+AUTUMN_FEED_PRICE_AC = 100       # цена осеннего корма в осенних монетах
 
 # Картинки
 MAIN_MENU_IMG = "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"
@@ -57,6 +59,7 @@ AUTUMN_EVENT_IMG = "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"
 #   Изображения для разделов 
 # ----------------------------------------------------------------------
 SECTION_IMAGES: Dict[str, str] = {
+    "main": MAIN_MENU_IMG,
     "about": "https://i.postimg.cc/BZ580SNj/5355070803995130961.jpg",
     "farm": "https://i.postimg.cc/dVf3BLQx/5355070803995130963.jpg",
     "shop": "https://i.postimg.cc/cHyJp2n7/5355070803995130964.jpg",
@@ -66,6 +69,7 @@ SECTION_IMAGES: Dict[str, str] = {
     "casino": "https://i.postimg.cc/zvZBKMj2/5355070803995131009.jpg",
     "promo": "https://i.postimg.cc/kXCG50DB/5355070803995131030.jpg",
     "autumn": AUTUMN_EVENT_IMG,
+    "autumn_portal": AUTUMN_EVENT_IMG,
     "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "logs": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "top": "https://i.postimg.cc/mg2rY7Y4/5355070803995131023.jpg",
@@ -294,6 +298,8 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "autumn_coins",
+        "autumn_click_last",
     }
     for col in needed:
         if col not in existing:
@@ -1034,7 +1040,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("💰 Получить монеты", callback_data="get_coins"),
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
-        InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
+        InlineKeyboardButton("🍂 Осенний портал", callback_data="autumn_portal"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
     if is_admin(user_id):
@@ -1822,6 +1828,148 @@ async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ----------------------------------------------------------------------
+#   Осенний портал: меню, клик, магазин, топ
+# ----------------------------------------------------------------------
+async def autumn_portal(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    active = cur.fetchone()["autumn_event_active"]
+    status = "✅ Включено" if active else "❌ Выключено"
+    text = (
+        f"🍂 Осенний портал\n"
+        f"{status}\n"
+        f"Осенние монеты: {format_num(user['autumn_coins'])}\n"
+        f"Кликайте, чтобы получать осенние монеты, и тратьте их в магазине.\n"
+    )
+    btns = [
+        InlineKeyboardButton("🖱️ Клик (осенние монеты)", callback_data="autumn_click"),
+        InlineKeyboardButton("🛒 Осенний магазин", callback_data="autumn_shop"),
+        InlineKeyboardButton("🏆 Осенний топ", callback_data="autumn_top"),
+        InlineKeyboardButton("ℹ️ Об событии", callback_data="autumn_event"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn_portal",
+        reply_markup=kb,
+    )
+
+
+async def autumn_click(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    if cur.fetchone()["autumn_event_active"] == 0:
+        await edit_section(query, caption="❌ Осеннее событие выключено.", image_key="autumn_portal")
+        return
+    now = int(time.time())
+    last = user["autumn_click_last"] or 0
+    if now - last < AUTUMN_CLICK_COOLDOWN:
+        left = AUTUMN_CLICK_COOLDOWN - (now - last)
+        await edit_section(
+            query,
+            caption=f"⌛ Подождите {left} сек. до следующего клика.",
+            image_key="autumn_portal",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_portal")]]
+            ),
+        )
+        return
+    reward = random.randint(1, 5)
+    update_user(
+        uid,
+        autumn_coins=min(MAX_INT, user["autumn_coins"] + reward),
+        autumn_click_last=now,
+    )
+    log_user_action(uid, f"Осенний клик: +{reward}🍁")
+    await edit_section(
+        query,
+        caption=f"🍁 Вы получили {reward} осенних монет! Всего: {format_num(get_user(uid)['autumn_coins'])}",
+        image_key="autumn_portal",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_portal")]]
+        ),
+    )
+
+
+async def autumn_shop(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    text = (
+        "🛒 Осенний магазин\n"
+        f"Осенние монеты: {format_num(user['autumn_coins'])}\n"
+        f"🍂 Осенний корм: {AUTUMN_FEED_PRICE_AC}🍁 за 1 шт."
+    )
+    btns = [
+        InlineKeyboardButton(
+            f"Купить осенний корм (−{AUTUMN_FEED_PRICE_AC}🍁)",
+            callback_data="autumn_buy_feed",
+        ),
+        InlineKeyboardButton("⬅️ Назад", callback_data="autumn_portal"),
+    ]
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn_portal",
+        reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=1)),
+    )
+
+
+async def autumn_buy_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    if user["autumn_coins"] < AUTUMN_FEED_PRICE_AC:
+        await edit_section(
+            query,
+            caption=f"❌ Недостаточно осенних монет. Нужно {AUTUMN_FEED_PRICE_AC}🍁.",
+            image_key="autumn_portal",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_shop")]]
+            ),
+        )
+        return
+    update_user(
+        uid,
+        autumn_coins=user["autumn_coins"] - AUTUMN_FEED_PRICE_AC,
+        autumn_feed=user["autumn_feed"] + 1,
+    )
+    log_user_action(uid, f"Купил осенний корм за {AUTUMN_FEED_PRICE_AC}🍁")
+    await edit_section(
+        query,
+        caption=f"✅ Куплен 1 осенний корм (−{AUTUMN_FEED_PRICE_AC}🍁).",
+        image_key="autumn_portal",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ В осенний магазин", callback_data="autumn_shop")]]
+        ),
+    )
+
+
+async def autumn_top(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cur.execute(
+        "SELECT username, autumn_coins, user_id FROM users ORDER BY autumn_coins DESC LIMIT 10"
+    )
+    rows = cur.fetchall()
+    if not rows:
+        txt = "🏆 Осенний топ: пока пусто."
+    else:
+        txt = "🏆 Осенний топ по осенним монетам\n━━━━━━━━━━━━\n"
+        for i, row in enumerate(rows, 1):
+            name = row["username"] or f"Пользователь {row['user_id']}"
+            txt += f"{i}. {name} — {format_num(row['autumn_coins'])}🍁\n"
+    await edit_section(
+        query,
+        caption=txt,
+        image_key="autumn_portal",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_portal")]]
+        ),
+    )
+
+
 async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(query.from_user.id):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="autumn")
@@ -1838,7 +1986,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
     cur.execute("SELECT user_id FROM users")
     for (uid,) in cur.fetchall():
         try:
-            context.bot.send_message(uid, txt)
+            await context.bot.send_message(uid, txt)
         except Exception:
             pass
     await edit_section(
@@ -2286,6 +2434,21 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "autumn_event":
         await autumn_event_info(query, context)
         return
+    if data == "autumn_portal":
+        await autumn_portal(query, context)
+        return
+    if data == "autumn_click":
+        await autumn_click(query, context)
+        return
+    if data == "autumn_shop":
+        await autumn_shop(query, context)
+        return
+    if data == "autumn_buy_feed":
+        await autumn_buy_feed(query, context)
+        return
+    if data == "autumn_top":
+        await autumn_top(query, context)
+        return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
@@ -2618,7 +2781,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Трейд (упрощённый пример) -------------------
     if txt.lower().startswith("/trade"):
-        await start_trade(query, context)   # функция start_trade реализована ниже
+        await start_trade(update, context)
         return
 
     # ------------------- Любой другой текст -------------------
@@ -2629,13 +2792,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ----------------------------------------------------------------------
 #   Трейд (упрощённый пример)
 # ----------------------------------------------------------------------
-async def start_trade(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запускает простую схему трейда – запрос получателя."""
     context.user_data["trade_state"] = {"step": 1}
-    await edit_section(
-        query,
+    await update.message.reply_photo(
+        MAIN_MENU_IMG,
         caption="🤝 Трейд: введите ID получателя (user_id).",
-        image_key="farm",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         ),
@@ -2780,7 +2942,7 @@ async def stat_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"💬 Репутация: {db_user['reputation']}\n"
         f"⚡ Титул: {get_status(db_user['coins'])}\n"
         f"🕷️ Паук‑секрет: {'Да' if db_user['secret_spider'] else 'Нет'}\n"
-        f"🔁 Перерождений: {db_user.get('rebirths', 0)}\n"
+        f"🔁 Перерождений: {db_user['rebirths'] if 'rebirths' in db_user.keys() else 0}\n"
         f"⏳ До конца сезона №{season_number}: {h}ч {m}м\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
