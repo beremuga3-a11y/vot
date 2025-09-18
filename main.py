@@ -143,6 +143,7 @@ def init_db() -> None:
             coins INTEGER DEFAULT 0,
             feed INTEGER DEFAULT 0,
             autumn_feed INTEGER DEFAULT 0,
+            autumn_feed_used INTEGER DEFAULT 0,
             weekly_coins INTEGER DEFAULT 0,
             last_reset INTEGER DEFAULT 0,
             secret_spider INTEGER DEFAULT 0,
@@ -223,6 +224,33 @@ def init_db() -> None:
             pet_qty INTEGER DEFAULT 0,
             max_uses INTEGER DEFAULT 1,
             used INTEGER DEFAULT 0
+        );
+        """
+    )
+    # ---------- autumn_achievements ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS autumn_achievements (
+            user_id INTEGER,
+            achievement_id TEXT,
+            completed_at INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, achievement_id)
+        );
+        """
+    )
+    # ---------- autumn_events ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS autumn_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            description TEXT,
+            reward_coins INTEGER DEFAULT 0,
+            reward_pet TEXT,
+            reward_pet_qty INTEGER DEFAULT 0,
+            start_time INTEGER,
+            end_time INTEGER,
+            is_active INTEGER DEFAULT 1
         );
         """
     )
@@ -329,6 +357,7 @@ def ensure_user_columns() -> None:
     needed = {
         "feed",
         "autumn_feed",
+        "autumn_feed_used",
         "weekly_coins",
         "last_reset",
         "secret_spider",
@@ -414,20 +443,28 @@ def get_user_clan(user_id: int) -> sqlite3.Row | None:
 
 def join_clan(user_id: int, clan_id: int) -> bool:
     """Присоединяет пользователя к клану."""
-    # Проверяем, есть ли место в клане
-    cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan_id,))
-    member_count = cur.fetchone()["count"]
-    cur.execute("SELECT max_members FROM clans WHERE id = ?", (clan_id,))
-    max_members = cur.fetchone()["max_members"]
-    
-    if member_count >= max_members:
+    # Проверяем, что пользователь не в клане
+    if get_user_clan(user_id):
         return False
     
+    # Проверяем, что клан существует
+    cur.execute("SELECT id, max_members, name FROM clans WHERE id = ?", (clan_id,))
+    clan = cur.fetchone()
+    if not clan:
+        return False
+    
+    # Проверяем лимит участников
+    cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan_id,))
+    member_count = cur.fetchone()["count"]
+    if member_count >= clan["max_members"]:
+        return False
+    
+    # Добавляем участника
     _execute(
-        "INSERT INTO clan_members (user_id, clan_id, joined_at) VALUES (?,?,?)",
-        (user_id, clan_id, int(time.time()))
+        "INSERT INTO clan_members (user_id, clan_id, role, joined_at) VALUES (?,?,?,?)",
+        (user_id, clan_id, "member", int(time.time()))
     )
-    log_user_action(user_id, f"Присоединился к клану {clan_id}")
+    log_user_action(user_id, f"Присоединился к клану '{clan['name']}' (ID {clan_id})")
     return True
 
 
@@ -469,6 +506,48 @@ def get_clan_top() -> List[sqlite3.Row]:
     """Возвращает топ кланов по опыту."""
     cur.execute("SELECT * FROM clans ORDER BY experience DESC LIMIT 10")
     return cur.fetchall()
+
+
+def add_clan_experience(clan_id: int, exp: int) -> None:
+    """Добавляет опыт клану."""
+    cur.execute("SELECT experience FROM clans WHERE id = ?", (clan_id,))
+    current_exp = cur.fetchone()["experience"]
+    new_exp = current_exp + exp
+    
+    # Проверяем повышение уровня (каждые 1000 опыта = +1 уровень)
+    cur.execute("SELECT level FROM clans WHERE id = ?", (clan_id,))
+    current_level = cur.fetchone()["level"]
+    new_level = (new_exp // 1000) + 1
+    
+    if new_level > current_level:
+        # Увеличиваем лимит участников при повышении уровня
+        new_max_members = 10 + (new_level - 1) * 2
+        _execute(
+            "UPDATE clans SET experience = ?, level = ?, max_members = ? WHERE id = ?",
+            (new_exp, new_level, new_max_members, clan_id)
+        )
+    else:
+        _execute("UPDATE clans SET experience = ? WHERE id = ?", (new_exp, clan_id))
+
+
+def add_clan_contribution(user_id: int, contribution: int) -> None:
+    """Добавляет вклад участника в клан."""
+    user_clan = get_user_clan(user_id)
+    if user_clan:
+        cur.execute(
+            "SELECT contribution FROM clan_members WHERE user_id = ?",
+            (user_id,)
+        )
+        current_contribution = cur.fetchone()["contribution"]
+        new_contribution = current_contribution + contribution
+        
+        _execute(
+            "UPDATE clan_members SET contribution = ? WHERE user_id = ?",
+            (new_contribution, user_id)
+        )
+        
+        # Добавляем опыт клану (1 вклад = 1 опыт)
+        add_clan_experience(user_clan["id"], contribution)
 
 
 # ----------------------------------------------------------------------
@@ -1494,6 +1573,8 @@ async def feed_animal(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         log_user_action(uid, f"Кормил {animal} обычным кормом")
         bonus_text = "+40% дохода"
+        # Добавляем вклад в клан за кормление
+        add_clan_contribution(uid, 5)
     else:   # autumn
         if user["autumn_feed"] == 0:
             await edit_section(
@@ -1508,11 +1589,14 @@ async def feed_animal(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_user(
             uid,
             autumn_feed=user["autumn_feed"] - 1,
+            autumn_feed_used=user.get("autumn_feed_used", 0) + 1,
             autumn_bonus_end=int(time.time()) + 3600,
             reputation=user["reputation"] + 1,
         )
         log_user_action(uid, f"Кормил {animal} осенним кормом")
         bonus_text = "×2 дохода"
+        # Добавляем больший вклад в клан за осенний корм
+        add_clan_contribution(uid, 10)
     set_pet_last_fed(uid, animal, int(time.time()))
     await edit_section(
         query,
@@ -1957,6 +2041,11 @@ async def buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     update_user(uid, **upd)
     set_pet_last_fed(uid, field, int(time.time()))
     log_user_action(uid, f"Купил {qty} шт. {field} за {total_price}🪙")
+    
+    # Добавляем вклад в клан (1% от потраченных денег)
+    clan_contribution = total_price // 100
+    if clan_contribution > 0:
+        add_clan_contribution(uid, clan_contribution)
     await edit_section(
         query,
         caption=(
@@ -2108,6 +2197,305 @@ def delete_promo(code: str) -> None:
     _execute("DELETE FROM promo_codes WHERE code = ?", (code,))
 
 
+# ----------------------------------------------------------------------
+#   Функции для осенних достижений
+# ----------------------------------------------------------------------
+def check_autumn_achievement(user_id: int, achievement_id: str) -> bool:
+    """Проверяет, выполнено ли достижение пользователем."""
+    cur.execute(
+        "SELECT 1 FROM autumn_achievements WHERE user_id = ? AND achievement_id = ?",
+        (user_id, achievement_id)
+    )
+    return cur.fetchone() is not None
+
+
+def complete_autumn_achievement(user_id: int, achievement_id: str) -> None:
+    """Отмечает достижение как выполненное."""
+    if not check_autumn_achievement(user_id, achievement_id):
+        _execute(
+            "INSERT INTO autumn_achievements (user_id, achievement_id, completed_at) VALUES (?,?,?)",
+            (user_id, achievement_id, int(time.time()))
+        )
+
+
+def get_autumn_achievements(user_id: int) -> List[sqlite3.Row]:
+    """Возвращает список выполненных достижений пользователя."""
+    cur.execute(
+        "SELECT * FROM autumn_achievements WHERE user_id = ? ORDER BY completed_at DESC",
+        (user_id,)
+    )
+    return cur.fetchall()
+
+
+def get_autumn_achievement_progress(user_id: int) -> Dict[str, int]:
+    """Возвращает прогресс по осенним достижениям."""
+    user = get_user(user_id)
+    
+    progress = {
+        "autumn_pets_collected": 0,
+        "autumn_feed_used": 0,
+        "coins_earned_autumn": 0,
+        "clan_contributions": 0,
+        "daily_logins": 0
+    }
+    
+    # Подсчитываем осенних питомцев
+    autumn_pets = ["autumn_dragon", "harvest_phoenix", "golden_unicorn", "autumn_leviathan", 
+                   "harvest_golem", "autumn_kraken", "golden_spider", "autumn_titan", 
+                   "harvest_void", "ultimate_autumn"]
+    
+    for pet in autumn_pets:
+        if pet in user and user[pet] > 0:
+            progress["autumn_pets_collected"] += user[pet]
+    
+    # Подсчитываем использованный осенний корм
+    progress["autumn_feed_used"] = user.get("autumn_feed_used", 0)
+    
+    # Подсчитываем заработанные монеты (примерно)
+    progress["coins_earned_autumn"] = user.get("weekly_coins", 0)
+    
+    # Подсчитываем вклад в клан
+    user_clan = get_user_clan(user_id)
+    if user_clan:
+        cur.execute("SELECT contribution FROM clan_members WHERE user_id = ?", (user_id,))
+        result = cur.fetchone()
+        if result:
+            progress["clan_contributions"] = result["contribution"]
+    
+    return progress
+
+
+# ----------------------------------------------------------------------
+#   Новые осенние функции
+# ----------------------------------------------------------------------
+async def autumn_achievements_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню осенних достижений."""
+    uid = query.from_user.id
+    achievements = get_autumn_achievements(uid)
+    progress = get_autumn_achievement_progress(uid)
+    
+    text = "🏆 ОСЕННИЕ ДОСТИЖЕНИЯ 🏆\n\n"
+    
+    # Список всех возможных достижений
+    all_achievements = [
+        ("autumn_collector", "🍂 Собиратель", "Собрать 10 осенних питомцев", 10, progress['autumn_pets_collected']),
+        ("autumn_feeder", "🌾 Кормилец", "Использовать 50 осеннего корма", 50, progress['autumn_feed_used']),
+        ("autumn_earner", "💰 Заработок", "Заработать 10M монет", 10_000_000, progress['coins_earned_autumn']),
+        ("clan_contributor", "⚔️ Клановец", "Внести 1000 вклада в клан", 1000, progress['clan_contributions']),
+    ]
+    
+    completed_count = 0
+    for achievement_id, name, desc, target, current in all_achievements:
+        is_completed = check_autumn_achievement(uid, achievement_id)
+        if is_completed:
+            completed_count += 1
+            status = "✅"
+        else:
+            status = "⏳"
+        
+        progress_text = f"{current}/{target}" if not is_completed else "Выполнено!"
+        text += f"{status} {name}\n{desc}\nПрогресс: {progress_text}\n\n"
+    
+    text += f"📊 Выполнено: {completed_count}/{len(all_achievements)}"
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event_info")]]
+        ),
+    )
+
+
+async def autumn_events_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню осенних событий."""
+    text = (
+        "🎁 ОСЕННИЕ СОБЫТИЯ 🎁\n\n"
+        "🔥 АКТИВНЫЕ СОБЫТИЯ:\n"
+        "• Двойной доход от осеннего корма\n"
+        "• Специальные осенние питомцы в магазине\n"
+        "• Бонусы за клановую активность\n\n"
+        "⏰ ВРЕМЕННЫЕ СОБЫТИЯ:\n"
+        "• Урожайный день (каждую субботу)\n"
+        "• Клановые битвы (каждое воскресенье)\n"
+        "• Осенний турнир (ежемесячно)\n\n"
+        "🎯 СЛЕДУЮЩИЕ СОБЫТИЯ:\n"
+        "• Новогодний марафон (скоро!)\n"
+        "• Зимние питомцы (в разработке)"
+    )
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event_info")]]
+        ),
+    )
+
+
+async def autumn_shop_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Осенний магазин с эксклюзивными товарами."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    
+    text = (
+        "🛒 ОСЕННИЙ МАГАЗИН 🛒\n\n"
+        f"💰 Ваши монеты: {format_num(user['coins'])}🪙\n\n"
+        "🍂 ОСЕННИЕ ТОВАРЫ:\n"
+        "• Осенний корм - двойной доход на 1 час\n"
+        "• Осенние питомцы - эксклюзивные виды\n"
+        "• Осенние украшения для фермы\n\n"
+        "🎁 СПЕЦИАЛЬНЫЕ ПРЕДЛОЖЕНИЯ:\n"
+        "• Пакет новичка (5 осенних питомцев)\n"
+        "• Пакет профи (10 осенних питомцев + корм)\n"
+        "• Пакет мастера (все осенние питомцы)"
+    )
+    
+    btns = [
+        InlineKeyboardButton("🌾 Осенний корм", callback_data="buy_autumn_feed"),
+        InlineKeyboardButton("🐉 Осенние питомцы", callback_data="autumn_pets_shop"),
+        InlineKeyboardButton("🎁 Пакеты", callback_data="autumn_packages"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event_info"),
+    ]
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn",
+        reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+    )
+
+
+async def autumn_pets_shop(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Магазин осенних питомцев."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    
+    text = (
+        "🐉 ОСЕННИЕ ПИТОМЦЫ 🐉\n\n"
+        f"💰 Ваши монеты: {format_num(user['coins'])}🪙\n\n"
+        "🍂 ДОСТУПНЫЕ ПИТОМЦЫ:\n"
+        "• Осенний Дракон - 15M монет\n"
+        "• Феникс Урожая - 18M монет\n"
+        "• Золотой Единорог - 20M монет\n"
+        "• Осенний Левиафан - 25M монет\n"
+        "• Голем Урожая - 30M монет\n\n"
+        "💎 РЕДКИЕ ПИТОМЦЫ:\n"
+        "• Осенний Кракен - 50M монет\n"
+        "• Золотой Паук - 75M монет\n"
+        "• Осенний Титан - 100M монет"
+    )
+    
+    btns = [
+        InlineKeyboardButton("🐉 Осенний Дракон", callback_data="buy_autumn_pet_autumn_dragon"),
+        InlineKeyboardButton("🦜 Феникс Урожая", callback_data="buy_autumn_pet_harvest_phoenix"),
+        InlineKeyboardButton("🦄 Золотой Единорог", callback_data="buy_autumn_pet_golden_unicorn"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="autumn_shop"),
+    ]
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn",
+        reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+    )
+
+
+async def buy_autumn_pet(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Покупка осеннего питомца."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    pet_name = query.data.split("_")[-1]  # autumn_dragon, harvest_phoenix, etc.
+    
+    # Найдем питомца в конфиге
+    pet_config = None
+    for field, inc, emoji, name, pet_class, price, desc in ANIMAL_CONFIG:
+        if field == pet_name and pet_class == "autumn":
+            pet_config = (field, inc, emoji, name, pet_class, price, desc)
+            break
+    
+    if not pet_config:
+        await edit_section(
+            query,
+            caption="❌ Питомец не найден!",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_pets_shop")]]
+            ),
+        )
+        return
+    
+    field, inc, emoji, name, pet_class, price, desc = pet_config
+    
+    if user["coins"] < price:
+        await edit_section(
+            query,
+            caption=f"❌ Недостаточно монет!\nНужно: {format_num(price)}🪙\nУ вас: {format_num(user['coins'])}🪙",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_pets_shop")]]
+            ),
+        )
+        return
+    
+    # Проверяем лимит питомцев
+    total_pets = sum(user[f] for f, *_ in ANIMAL_CONFIG)
+    if total_pets >= user["pet_limit"]:
+        await edit_section(
+            query,
+            caption=f"❌ Достигнут лимит питомцев ({user['pet_limit']})!\nСначала улучшите базу или продайте часть животных.",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_pets_shop")]]
+            ),
+        )
+        return
+    
+    # Покупаем питомца
+    update_user(
+        uid,
+        coins=user["coins"] - price,
+        weekly_coins=user["weekly_coins"] + price,
+        reputation=user["reputation"] + 5,
+        **{field: user[field] + 1}
+    )
+    
+    set_pet_last_fed(uid, field, int(time.time()))
+    log_user_action(uid, f"Купил осеннего питомца {name} за {format_num(price)}🪙")
+    
+    # Добавляем вклад в клан (5% от потраченных денег)
+    clan_contribution = price // 20
+    if clan_contribution > 0:
+        add_clan_contribution(uid, clan_contribution)
+    
+    # Проверяем достижения
+    progress = get_autumn_achievement_progress(uid)
+    if progress["autumn_pets_collected"] >= 1 and not check_autumn_achievement(uid, "autumn_collector"):
+        complete_autumn_achievement(uid, "autumn_collector")
+        await query.edit_message_caption(
+            caption=f"🎉 ПОЗДРАВЛЯЕМ!\n\n"
+                   f"✅ Вы купили {emoji} {name}!\n"
+                   f"💰 Потрачено: {format_num(price)}🪙\n"
+                   f"📈 Доход: +{format_num(inc)}🪙/мин\n\n"
+                   f"🏆 ДОСТИЖЕНИЕ РАЗБЛОКИРОВАНО!\n"
+                   f"🍂 Собиратель - Собрать первого осеннего питомца!"
+        )
+    else:
+        await edit_section(
+            query,
+            caption=f"✅ Вы купили {emoji} {name}!\n"
+                   f"💰 Потрачено: {format_num(price)}🪙\n"
+                   f"📈 Доход: +{format_num(inc)}🪙/мин\n"
+                   f"🏛️ Вклад в клан: +{clan_contribution}",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_pets_shop")]]
+            ),
+        )
+
+
 async def promo_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать пользователю кнопку ввода кода."""
     await edit_section(
@@ -2244,6 +2632,11 @@ async def farmer_buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     update_user(uid, coins=user["coins"] - price)
     log_user_action(uid, f"Купил фермера {farmer_name} за {price}🪙")
+    
+    # Добавляем вклад в клан (2% от потраченных денег)
+    clan_contribution = price // 50
+    if clan_contribution > 0:
+        add_clan_contribution(uid, clan_contribution)
     # Отправляем фото, если есть
     photo_url = FARMER_IMAGES.get(farmer_name)
     if photo_url:
@@ -2587,10 +2980,25 @@ async def clan_create(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     
+    # Проверяем, есть ли у пользователя достаточно монет для создания клана
+    user = get_user(uid)
+    clan_creation_cost = 1_000_000  # 1 миллион монет для создания клана
+    
+    if user["coins"] < clan_creation_cost:
+        await edit_section(
+            query,
+            caption=f"❌ Недостаточно монет для создания клана!\nНужно: {format_num(clan_creation_cost)}🪙\nУ вас: {format_num(user['coins'])}🪙",
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="clans")]]
+            ),
+        )
+        return
+    
     context.user_data["awaiting_clan_name"] = True
     await edit_section(
         query,
-        caption="🏗️ Введите название клана (максимум 20 символов):",
+        caption=f"🏗️ Введите название клана (максимум 20 символов):\n\n💰 Стоимость создания: {format_num(clan_creation_cost)}🪙",
         image_key="admin",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Отмена", callback_data="clans")]]
@@ -3093,6 +3501,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "autumn_event":
         await autumn_event_info(query, context)
         return
+    if data == "autumn_event_info":
+        await autumn_event_info(query, context)
+        return
+    if data == "autumn_achievements":
+        await autumn_achievements_menu(query, context)
+        return
+    if data == "autumn_events":
+        await autumn_events_menu(query, context)
+        return
+    if data == "autumn_shop":
+        await autumn_shop_menu(query, context)
+        return
+    if data == "autumn_pets_shop":
+        await autumn_pets_shop(query, context)
+        return
+    if data.startswith("buy_autumn_pet_"):
+        await buy_autumn_pet(query, context)
+        return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
@@ -3329,13 +3755,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data["awaiting_clan_name"] = False
             return
         
+        # Проверяем монеты и списываем их
+        user = get_user(uid)
+        clan_creation_cost = 1_000_000
+        
+        if user["coins"] < clan_creation_cost:
+            await update.message.reply_text(f"❌ Недостаточно монет! Нужно: {format_num(clan_creation_cost)}🪙")
+            context.user_data["awaiting_clan_name"] = False
+            return
+        
         try:
+            # Списываем монеты
+            update_user(uid, coins=user["coins"] - clan_creation_cost)
+            log_user_action(uid, f"Создал клан '{clan_name}' за {format_num(clan_creation_cost)}🪙")
+            
             clan_id = create_clan(clan_name, uid)
-            await update.message.reply_text(f"✅ Клан '{clan_name}' создан! ID клана: {clan_id}")
+            await update.message.reply_text(
+                f"✅ Клан '{clan_name}' создан!\n"
+                f"🆔 ID клана: {clan_id}\n"
+                f"💰 Потрачено: {format_num(clan_creation_cost)}🪙"
+            )
         except Exception as e:
+            # Возвращаем монеты при ошибке
+            update_user(uid, coins=user["coins"])
             await update.message.reply_text(f"❌ Ошибка создания клана: {str(e)}")
         
         context.user_data["awaiting_clan_name"] = False
+        return
+
+    # ------------------- Присоединение к клану -------------------
+    if context.user_data.get("awaiting_clan_join"):
+        if not txt.isdigit():
+            await update.message.reply_text("❌ Введите числовой ID клана.")
+            return
+        
+        clan_id = int(txt)
+        uid = update.effective_user.id
+        
+        if get_user_clan(uid):
+            await update.message.reply_text("❌ Вы уже состоите в клане!")
+            context.user_data["awaiting_clan_join"] = False
+            return
+        
+        if join_clan(uid, clan_id):
+            cur.execute("SELECT name FROM clans WHERE id = ?", (clan_id,))
+            clan_name = cur.fetchone()["name"]
+            await update.message.reply_text(f"✅ Вы присоединились к клану '{clan_name}'!")
+        else:
+            await update.message.reply_text("❌ Не удалось присоединиться к клану. Возможно, клан полный или не существует.")
+        
+        context.user_data["awaiting_clan_join"] = False
         return
 
     # ------------------- Админ функции кланов -------------------
