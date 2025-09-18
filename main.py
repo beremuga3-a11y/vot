@@ -2839,7 +2839,7 @@ def main() -> None:
     app.job_queue.run_repeating(auto_collect, interval=60, first=10)          # доход каждые 1 мин
     app.job_queue.run_repeating(check_hunger, interval=300, first=30)        # проверка голода
     app.job_queue.run_repeating(
-        lambda _: check_and_reset_season(),
+        lambda context: check_and_reset_season(),
         interval=86400,
         first=5,
     )                  # проверка сезона
