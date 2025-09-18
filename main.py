@@ -1264,7 +1264,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("💰 Получить монеты", callback_data="get_coins"),
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
-        InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
+        InlineKeyboardButton("🍂 Осенний портал", callback_data="autumn_portal"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
@@ -2083,6 +2083,41 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ----------------------------------------------------------------------
+#   Осенний портал
+# ----------------------------------------------------------------------
+async def autumn_portal_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает осенний портал с информацией и возможностями."""
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    active = cur.fetchone()["autumn_event_active"]
+    status = "✅ Включено" if active else "❌ Выключено"
+    
+    text = (
+        f"🍂 Осенний портал 🍂\n\n"
+        f"Статус события: {status}\n\n"
+        f"🌾 Добро пожаловать в осенний портал!\n"
+        f"Здесь вы можете:\n"
+        f"• Покупать осенний корм для двойного дохода\n"
+        f"• Участвовать в осенних акциях\n"
+        f"• Получать сезонные бонусы\n\n"
+        f"🍁 Осенний корм дает двойной доход на 1 час!\n"
+        f"Стоимость: {format_num(AUTUMN_FOOD_PRICE)}🪙"
+    )
+    
+    btns = [
+        InlineKeyboardButton("🛒 Купить осенний корм", callback_data="buy_autumn_feed"),
+        InlineKeyboardButton("ℹ️ О событии", callback_data="autumn_event"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="back"),
+    ]
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn",
+        reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+    )
+
+
+# ----------------------------------------------------------------------
 #   Промокоды
 # ----------------------------------------------------------------------
 def add_promo(
@@ -2526,7 +2561,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m.get('username') or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3093,6 +3128,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "autumn_event":
         await autumn_event_info(query, context)
         return
+    # ------------------- Осенний портал -------------------
+    if data == "autumn_portal":
+        await autumn_portal_section(query, context)
+        return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
@@ -3383,7 +3422,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member.get('username') or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
