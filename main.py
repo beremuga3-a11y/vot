@@ -47,6 +47,15 @@ CHANNEL_USERNAME = "spiderfarminfo"
 CHANNEL_ID = -1001234567890
 CHAT_ID = -4966660960
 CHAT_LINK = "https://t.me/+tjqmdwVMjtYxMTU6"
+
+# ----------------------------------------------------------------------
+#   Экономические настройки
+# ----------------------------------------------------------------------
+# Множители для динамического ценообразования
+PRICE_SCALING_FACTOR = 1.15      # Каждое животное дороже предыдущего на 15%
+INCOME_DIMINISHING_FACTOR = 0.95 # Доход уменьшается на 5% за каждое животное
+MAINTENANCE_COST_RATE = 0.02     # 2% от стоимости животного в час на содержание
+MIN_INCOME_MULTIPLIER = 0.1      # Минимальный доход (10% от базового)
 CHANNEL_LINK = "https://t.me/spiderfarminfo"
 
 # Картинки
@@ -998,10 +1007,75 @@ def paginate_items(items: List[Any], page: int) -> Tuple[List[Any], int]:
 
 
 # ----------------------------------------------------------------------
+#   Новая экономическая система
+# ----------------------------------------------------------------------
+def get_dynamic_price(animal_field: str, current_count: int) -> int:
+    """Вычисляет динамическую цену животного на основе текущего количества."""
+    # Находим базовую цену животного
+    base_price = 0
+    for field, _, _, _, _, price, _ in ANIMAL_CONFIG:
+        if field == animal_field:
+            base_price = price
+            break
+    
+    if base_price == 0:
+        return 0
+    
+    # Применяем экспоненциальное увеличение цены
+    # Каждое животное дороже предыдущего на PRICE_SCALING_FACTOR
+    return int(base_price * (PRICE_SCALING_FACTOR ** current_count))
+
+
+def get_dynamic_income(animal_field: str, current_count: int) -> int:
+    """Вычисляет динамический доход животного с учетом убывающей отдачи."""
+    # Находим базовый доход животного
+    base_income = 0
+    for field, income, _, _, _, _, _ in ANIMAL_CONFIG:
+        if field == animal_field:
+            base_income = income
+            break
+    
+    if base_income == 0:
+        return 0
+    
+    # Применяем убывающую отдачу
+    # Каждое дополнительное животное приносит меньше дохода
+    diminishing_income = base_income * (INCOME_DIMINISHING_FACTOR ** current_count)
+    
+    # Устанавливаем минимальный доход
+    min_income = base_income * MIN_INCOME_MULTIPLIER
+    
+    return max(int(diminishing_income), int(min_income))
+
+
+def calculate_maintenance_cost(user: sqlite3.Row) -> int:
+    """Вычисляет стоимость содержания всех животных."""
+    total_cost = 0
+    for field, _, _, _, _, base_price, _ in ANIMAL_CONFIG:
+        count = user[field]
+        if count > 0:
+            # Стоимость содержания = количество * базовая цена * ставка содержания
+            maintenance_per_animal = int(base_price * MAINTENANCE_COST_RATE)
+            total_cost += count * maintenance_per_animal
+    return total_cost
+
+
+def get_animal_efficiency(animal_field: str, current_count: int) -> float:
+    """Вычисляет эффективность животного (доход/цена)."""
+    price = get_dynamic_price(animal_field, current_count)
+    income = get_dynamic_income(animal_field, current_count)
+    
+    if price == 0:
+        return 0
+    
+    return income / price
+
+
+# ----------------------------------------------------------------------
 #   Доход (все питомцы, доход = income_per_minute)
 # ----------------------------------------------------------------------
 def calculate_income_per_min(user: sqlite3.Row) -> int:
-    """Возврат дохода за одну минуту."""
+    """Возврат дохода за одну минуту с учетом новой экономической системы."""
     now = time.time()
     mult = 1.0
     # Обычный корм – +40 %
@@ -1011,8 +1085,13 @@ def calculate_income_per_min(user: sqlite3.Row) -> int:
     if now < user["autumn_bonus_end"]:
         mult *= 2.0
     base = 0
-    for field, inc, *_ in ANIMAL_CONFIG:
-        base += user[field] * inc
+    # Используем новую систему динамического дохода
+    for field, _, _, _, _, _, _ in ANIMAL_CONFIG:
+        count = user[field]
+        if count > 0:
+            # Доход = количество * динамический доход за животное
+            animal_income = get_dynamic_income(field, count - 1)  # -1 потому что доход считается для следующего животного
+            base += count * animal_income
     # Доход от фермеров
     cur.execute("SELECT farmer_type, qty FROM farmers WHERE user_id = ?", (user["user_id"],))
     for row in cur.fetchall():
@@ -1022,6 +1101,11 @@ def calculate_income_per_min(user: sqlite3.Row) -> int:
             base += farmer_income * row["qty"]
     base += user["custom_income"]
     base = int(base * mult)
+    
+    # Вычитаем стоимость содержания
+    maintenance_cost = calculate_maintenance_cost(user)
+    base = max(0, base - maintenance_cost)
+    
     return max(1, base) if base > 0 else 0
 
 
@@ -1329,11 +1413,17 @@ async def farm_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = time.time()
     # Список животных
     lines = []
-    for field, inc, emoji, name, *_ in ANIMAL_CONFIG:
+    for field, _, emoji, name, *_ in ANIMAL_CONFIG:
         cnt = user[field]
         if cnt == 0:
             continue
-        inc_total = inc * cnt
+        
+        # Используем новую систему динамического дохода
+        total_income = 0
+        for i in range(cnt):
+            animal_income = get_dynamic_income(field, i)
+            total_income += animal_income
+        
         last_fed = get_pet_last_fed(uid, field)
         timer = "—"
         if last_fed:
@@ -1343,7 +1433,7 @@ async def farm_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 m = r // 60
                 timer = f"⏳ {h}ч {m}м"
         lines.append(
-            f"{emoji} {name}: {cnt} (+{format_num(inc_total)}🪙/мин) {timer}"
+            f"{emoji} {name}: {cnt} (+{format_num(total_income)}🪙/мин) {timer}"
         )
     farm_text = "\n".join(lines) or "❌ На ферме пока нет животных."
     # Список фермеров
@@ -1706,15 +1796,22 @@ async def status_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     user = get_user(uid)
     income_min = calculate_income_per_min(user)
+    maintenance_cost = calculate_maintenance_cost(user)
     left, season_number = get_season_info()
     h, r = divmod(left, 3600)
     m = r // 60
+    
+    # Вычисляем общий доход до вычета содержания
+    gross_income = income_min + maintenance_cost
+    
     text = (
         f"📊 Статус 📊\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID: {user['user_id']}\n"
         f"💰 Монеты: {format_num(user['coins'])}\n"
         f"💰 Доход за минуту: {format_num(income_min)}🪙\n"
+        f"💸 Содержание: -{format_num(maintenance_cost)}🪙/мин\n"
+        f"📈 Валовой доход: {format_num(gross_income)}🪙/мин\n"
         f"🏗️ База: уровень {user['base_level']} (лимит: {user['pet_limit']})\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🎟️ Билетов: {user['tickets']}\n"
@@ -1825,10 +1922,14 @@ async def render_shop(query, context: ContextTypes.DEFAULT_TYPE, page: int = 0) 
                 callback_data="buy_autumn_feed",
             )
         )
-    for field, _, emoji, name, _, price, _ in items:
+    for field, _, emoji, name, _, _, _ in items:
+        # Используем динамическую цену для каждого животного
+        user = get_user(query.from_user.id)
+        current_count = user[field]
+        dynamic_price = get_dynamic_price(field, current_count)
         btns.append(
             InlineKeyboardButton(
-                f"{emoji} {name} ({format_num(price)}🪙)", callback_data=f"show_{field}"
+                f"{emoji} {name} ({format_num(dynamic_price)}🪙)", callback_data=f"show_{field}"
             )
         )
     nav = []
@@ -1865,15 +1966,24 @@ async def show_animal(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rec:
         await query.edit_message_caption(caption="❌ Питомец не найден.")
         return
-    _, inc, emoji, name, _, price, desc = rec
+    _, _, emoji, name, _, _, desc = rec
     user = get_user(query.from_user.id)
+    current_count = user[field]
     total_pets = sum(user[f] for f, *_ in ANIMAL_CONFIG)
     limit_reached = total_pets >= user["pet_limit"]
+    
+    # Получаем динамические значения
+    dynamic_price = get_dynamic_price(field, current_count)
+    dynamic_income = get_dynamic_income(field, current_count)
+    efficiency = get_animal_efficiency(field, current_count)
+    
     txt = (
         f"{emoji} {name}\n"
-        f"Доход: {inc}🪙/мин\n"
-        f"Цена: {format_num(price)}🪙\n"
-        f"{desc}"
+        f"💰 Доход: {dynamic_income}🪙/мин (следующее)\n"
+        f"📊 У вас: {current_count} шт.\n"
+        f"💸 Цена: {format_num(dynamic_price)}🪙\n"
+        f"⚡ Эффективность: {efficiency:.3f}\n"
+        f"📝 {desc}"
     )
     if limit_reached:
         txt += f"\n⚠️ Вы достигли лимита питомцев ({user['pet_limit']}).\n"
@@ -1894,7 +2004,10 @@ async def buy_quantity(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rec:
         await query.edit_message_caption(caption="❌ Питомец не найден.")
         return
-    _, _, _, _, _, price, _ = rec
+    user = get_user(query.from_user.id)
+    current_count = user[field]
+    dynamic_price = get_dynamic_price(field, current_count)
+    
     btns = [
         InlineKeyboardButton("1", callback_data=f"buy_confirm_{field}_1"),
         InlineKeyboardButton("5", callback_data=f"buy_confirm_{field}_5"),
@@ -1904,7 +2017,7 @@ async def buy_quantity(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     kb = InlineKeyboardMarkup([btns])
     await edit_section(
         query,
-        caption=f"Сколько {field} купить? (цена за 1 шт: {format_num(price)}🪙)",
+        caption=f"Сколько {field} купить? (цена за 1 шт: {format_num(dynamic_price)}🪙)",
         image_key="shop",
         reply_markup=kb,
     )
@@ -1922,9 +2035,10 @@ async def buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rec:
         await query.edit_message_caption(caption="❌ Питомец не найден.")
         return
-    _, _, _, _, _, price, _ = rec
     uid = query.from_user.id
     user = get_user(uid)
+    current_count = user[field]
+    
     # проверка лимита
     total_pets = sum(user[f] for f, *_ in ANIMAL_CONFIG)
     free_slots = user["pet_limit"] - total_pets
@@ -1935,9 +2049,32 @@ async def buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_key="shop",
         )
         return
-    qty = user["coins"] // price if qty_raw == "all" else int(qty_raw)
-    qty = min(qty, free_slots)
-    total_price = price * qty
+    
+    # Вычисляем количество и общую стоимость с учетом динамических цен
+    if qty_raw == "all":
+        # Покупаем максимально возможное количество
+        qty = 0
+        total_price = 0
+        available_coins = user["coins"]
+        
+        for i in range(free_slots):
+            price_for_next = get_dynamic_price(field, current_count + i)
+            if available_coins >= price_for_next:
+                qty += 1
+                total_price += price_for_next
+                available_coins -= price_for_next
+            else:
+                break
+    else:
+        qty = int(qty_raw)
+        qty = min(qty, free_slots)
+        
+        # Вычисляем общую стоимость для указанного количества
+        total_price = 0
+        for i in range(qty):
+            price_for_next = get_dynamic_price(field, current_count + i)
+            total_price += price_for_next
+    
     if qty <= 0:
         await edit_section(query, caption="❌ Нечего покупать.", image_key="shop")
         return
@@ -2526,7 +2663,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m['username'] or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3383,7 +3520,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member['username'] or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
