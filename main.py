@@ -416,9 +416,11 @@ def join_clan(user_id: int, clan_id: int) -> bool:
     """Присоединяет пользователя к клану."""
     # Проверяем, есть ли место в клане
     cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan_id,))
-    member_count = cur.fetchone()["count"]
+    row = cur.fetchone()
+    member_count = row["count"] if row else 0
     cur.execute("SELECT max_members FROM clans WHERE id = ?", (clan_id,))
-    max_members = cur.fetchone()["max_members"]
+    row = cur.fetchone()
+    max_members = row["max_members"] if row else 0
     
     if member_count >= max_members:
         return False
@@ -1265,6 +1267,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
+        InlineKeyboardButton("🍂 Осенний портал", callback_data="autumn_portal"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
@@ -1818,7 +1821,8 @@ async def render_shop(query, context: ContextTypes.DEFAULT_TYPE, page: int = 0) 
         )
     ]
     cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
-    if cur.fetchone()["autumn_event_active"]:
+    row = cur.fetchone()
+    if row and row["autumn_event_active"]:
         btns.append(
             InlineKeyboardButton(
                 f"🍂 Осенний корм ({format_num(AUTUMN_FOOD_PRICE)}🪙)",
@@ -2033,7 +2037,8 @@ async def buy_autumn_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ----------------------------------------------------------------------
 async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
-    active = cur.fetchone()["autumn_event_active"]
+    row = cur.fetchone()
+    active = row["autumn_event_active"] if row else 0
     status = "✅ Включено" if active else "❌ Выключено"
     text = (
         f"{status}\n\n"
@@ -2058,7 +2063,8 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="autumn")
         return
     cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
-    current = cur.fetchone()["autumn_event_active"]
+    row = cur.fetchone()
+    current = row["autumn_event_active"] if row else 0
     new_val = 0 if current else 1
     _execute(
         "UPDATE global_settings SET autumn_event_active = ? WHERE id = 1",
@@ -2080,6 +2086,14 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
             [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
         ),
     )
+
+
+# ----------------------------------------------------------------------
+#   Осенний портал (альтернативное название для autumn_event_info)
+# ----------------------------------------------------------------------
+async def autumn_portal_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Осенний портал - альтернативное название для осеннего события"""
+    await autumn_event_info(query, context)
 
 
 # ----------------------------------------------------------------------
@@ -2410,9 +2424,11 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "admin_logs_stats":
         cur.execute("SELECT COUNT(*) as count FROM admin_logs")
-        total_logs = cur.fetchone()["count"]
+        row = cur.fetchone()
+        total_logs = row["count"] if row else 0
         cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs")
-        unique_users = cur.fetchone()["count"]
+        row = cur.fetchone()
+        unique_users = row["count"] if row else 0
         cur.execute("SELECT action, COUNT(*) as count FROM admin_logs GROUP BY action ORDER BY count DESC LIMIT 5")
         top_actions = cur.fetchall()
         
@@ -2460,11 +2476,14 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "admin_clan_stats":
         cur.execute("SELECT COUNT(*) as count FROM clans")
-        clan_count = cur.fetchone()["count"]
+        row = cur.fetchone()
+        clan_count = row["count"] if row else 0
         cur.execute("SELECT COUNT(*) as count FROM clan_members")
-        member_count = cur.fetchone()["count"]
+        row = cur.fetchone()
+        member_count = row["count"] if row else 0
         cur.execute("SELECT AVG(experience) as avg_exp FROM clans")
-        avg_exp = cur.fetchone()["avg_exp"] or 0
+        row = cur.fetchone()
+        avg_exp = row["avg_exp"] if row and row["avg_exp"] else 0
         
         text = (
             f"📊 Статистика кланов:\n\n"
@@ -2477,7 +2496,8 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         clans = get_clan_top()[:5]
         for i, clan in enumerate(clans, 1):
             cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan["id"],))
-            member_count = cur.fetchone()["count"]
+            row = cur.fetchone()
+            member_count = row["count"] if row else 0
             text += f"\n{i}. {clan['name']} - {clan['experience']} опыта ({member_count} участников)"
         
         await edit_section(
@@ -2526,7 +2546,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m['username'] or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -2609,7 +2629,8 @@ async def clan_search(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = "🔍 Доступные кланы:\n\n"
         for clan in clans:
             cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan["id"],))
-            member_count = cur.fetchone()["count"]
+            row = cur.fetchone()
+            member_count = row["count"] if row else 0
             text += f"🏰 {clan['name']}\n"
             text += f"   Уровень: {clan['level']} | Опыт: {clan['experience']}\n"
             text += f"   Участников: {member_count}/{clan['max_members']}\n\n"
@@ -2642,7 +2663,8 @@ async def clan_top(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = "🏆 Топ кланов по опыту:\n\n"
         for i, clan in enumerate(clans, 1):
             cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan["id"],))
-            member_count = cur.fetchone()["count"]
+            row = cur.fetchone()
+            member_count = row["count"] if row else 0
             text += f"{i}. 🏰 {clan['name']}\n"
             text += f"   Уровень: {clan['level']} | Опыт: {clan['experience']}\n"
             text += f"   Участников: {member_count}/{clan['max_members']}\n\n"
@@ -2664,9 +2686,11 @@ async def admin_clans_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     cur.execute("SELECT COUNT(*) as count FROM clans")
-    clan_count = cur.fetchone()["count"]
+    row = cur.fetchone()
+    clan_count = row["count"] if row else 0
     cur.execute("SELECT COUNT(*) as count FROM clan_members")
-    member_count = cur.fetchone()["count"]
+    row = cur.fetchone()
+    member_count = row["count"] if row else 0
     
     text = (
         f"⚔️ Управление кланами\n\n"
@@ -3093,6 +3117,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "autumn_event":
         await autumn_event_info(query, context)
         return
+    if data == "autumn_portal":
+        await autumn_portal_menu(query, context)
+        return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
@@ -3383,7 +3410,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member['username'] or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
