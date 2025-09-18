@@ -346,6 +346,10 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        # Новые столбцы
+        "autumn_points",
+        "last_autumn_collect",
+        "last_active",
     }
     for col in needed:
         if col not in existing:
@@ -414,6 +418,10 @@ def get_user_clan(user_id: int) -> sqlite3.Row | None:
 
 def join_clan(user_id: int, clan_id: int) -> bool:
     """Присоединяет пользователя к клану."""
+    # Нельзя быть в нескольких кланах одновременно
+    cur.execute("SELECT 1 FROM clan_members WHERE user_id = ? LIMIT 1", (user_id,))
+    if cur.fetchone():
+        return False
     # Проверяем, есть ли место в клане
     cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan_id,))
     member_count = cur.fetchone()["count"]
@@ -495,6 +503,11 @@ def log_user_action(user_id: int, action: str) -> None:
             "INSERT INTO admin_logs (user_id, action, ts) VALUES (?,?,?)",
             (user_id, action, int(time.time())),
         )
+        # Обновляем поле последней активности
+        try:
+            update_user(user_id, last_active=int(time.time()))
+        except Exception:
+            pass
     except Exception as e:
         log.error(f"Ошибка записи в журнал: {e}")
 
@@ -988,6 +1001,8 @@ def get_farmer(name: str) -> Tuple[str, int, int, str] | None:
 #   Пагинация
 # ----------------------------------------------------------------------
 ITEMS_PER_PAGE = 10   # для пагинации в магазине и /pets
+ADMIN_LOGS_PAGE_SIZE = 20  # размер страницы для журнала админа
+AUTUMN_COLLECT_COOLDOWN = 15 * 60  # 15 минут между сборами очков
 
 
 def paginate_items(items: List[Any], page: int) -> Tuple[List[Any], int]:
@@ -1070,7 +1085,7 @@ async def check_clan_battles(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Получаем битвы, которые должны завершиться
     cur.execute(
-        "SELECT * FROM clan_battles WHERE ended_at = 0 AND ? - started_at >= ?",
+        "SELECT * FROM clan_battles WHERE (ended_at IS NULL OR ended_at = 0) AND ? - started_at >= ?",
         (now, battle_duration)
     )
     expired_battles = cur.fetchall()
@@ -1281,6 +1296,11 @@ async def show_main_menu(
 ) -> None:
     user = update.effective_user
     db_user = get_user(user.id)
+    # фиксируем последнюю активность при открытии меню
+    try:
+        update_user(user.id, last_active=int(time.time()), username=user.username or user.full_name or "")
+    except Exception:
+        pass
     ticket_msg = (
         "\n🎟️ Ты получил 1 билет за ежедневный вход!"
         if give_daily_ticket(db_user)
@@ -2035,22 +2055,37 @@ async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
     active = cur.fetchone()["autumn_event_active"]
     status = "✅ Включено" if active else "❌ Выключено"
-    text = (
-        f"{status}\n\n"
-        "🍂 Осеннее событие – временный бонус:\n"
-        f"• При покупке осеннего корма (в магазине) вы получаете двойной доход\n"
-        f"  на 1 ч.\n"
-        f"• Стоимость осеннего корма – {format_num(AUTUMN_FOOD_PRICE)}🪙.\n"
-        "• Бонус активен только пока событие включено администратором."
-    )
-    await edit_section(
-        query,
-        caption=text,
-        image_key="autumn",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        ),
-    )
+    uid = query.from_user.id
+    user = get_user(uid)
+    left_collect = 0
+    if active:
+        now = int(time.time())
+        last = int(user["last_autumn_collect"] or 0)
+        cd = AUTUMN_COLLECT_COOLDOWN - max(0, now - last)
+        left_collect = max(0, cd)
+    lines = [
+        f"{status}",
+        "",
+        "🍂 Осеннее событие – собирайте листья и меняйте их на монеты!",
+        f"• Осенний корм: ×2 дохода на 1 ч (цена {format_num(AUTUMN_FOOD_PRICE)}🪙 в магазине)",
+        f"• Очков осени: {format_num(user['autumn_points'])}",
+    ]
+    if active:
+        if left_collect == 0:
+            lines.append("• Сбор листьев: доступен сейчас")
+        else:
+            h, r = divmod(left_collect, 3600)
+            m = r // 60
+            lines.append(f"• Сбор листьев через: {h}ч {m}м")
+    text = "\n".join(lines)
+
+    btn_rows = []
+    if active:
+        btn_rows.append([InlineKeyboardButton("🍁 Собрать листья", callback_data="autumn_collect")])
+        btn_rows.append([InlineKeyboardButton("💱 Обменять очки", callback_data="autumn_exchange")])
+        btn_rows.append([InlineKeyboardButton("🏆 Топ Осени", callback_data="autumn_top")])
+    btn_rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+    await edit_section(query, caption=text, image_key="autumn", reply_markup=InlineKeyboardMarkup(btn_rows))
 
 
 async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2072,14 +2107,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
             context.bot.send_message(uid, txt)
         except Exception:
             pass
-    await edit_section(
-        query,
-        caption=f"🍂 Осеннее событие {('включено' if new_val else 'выключено')}.",
-        image_key="autumn",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
-        ),
-    )
+    await autumn_event_info(query, context)
 
 
 # ----------------------------------------------------------------------
@@ -2287,6 +2315,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
         InlineKeyboardButton("🍂 Обнулить осенние монеты", callback_data="admin_reset_autumn"),
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
+        InlineKeyboardButton("📈 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
         InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
@@ -2372,29 +2401,87 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="✅ X‑ферма уже отсутствует.", image_key="admin")
         return
     if data == "admin_view_logs":
+        # Пагинация журнала
+        page = int(context.user_data.get("admin_logs_page", 0))
+        offset = page * ADMIN_LOGS_PAGE_SIZE
         cur.execute(
-            "SELECT user_id, action, ts FROM admin_logs ORDER BY ts DESC LIMIT 20"
+            "SELECT user_id, action, ts FROM admin_logs ORDER BY ts DESC LIMIT ? OFFSET ?",
+            (ADMIN_LOGS_PAGE_SIZE, offset),
         )
         rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) as c FROM admin_logs")
+        total = cur.fetchone()["c"]
+        total_pages = (max(total, 1) - 1) // ADMIN_LOGS_PAGE_SIZE + 1
         if not rows:
             txt = "📜 Журнал пуст."
         else:
-            txt = "📜 Последние действия игроков:\n"
+            txt = f"📜 Журнал действий (страница {page + 1}/{total_pages})\n"
             for row in rows:
                 t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
                 txt += f"[{t}] ID {row['user_id']}: {row['action']}\n"
-        
-        btns = [
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⏪ Пред.", callback_data="admin_logs_prev"))
+        if (page + 1) < total_pages:
+            nav.append(InlineKeyboardButton("След. ⏩", callback_data="admin_logs_next"))
+        base_btns = [
             InlineKeyboardButton("🔍 Поиск по ID", callback_data="admin_logs_search"),
             InlineKeyboardButton("📊 Статистика", callback_data="admin_logs_stats"),
             InlineKeyboardButton("⬅️ Назад", callback_data="admin"),
         ]
-        
+        rows_kb = chunk_buttons(base_btns, per_row=2)
+        if nav:
+            rows_kb.append(nav)
+        context.user_data["admin_logs_total_pages"] = total_pages
         await edit_section(
             query,
             caption=txt,
             image_key="logs",
-            reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+            reply_markup=InlineKeyboardMarkup(rows_kb),
+        )
+        return
+    if data in ("admin_logs_next", "admin_logs_prev"):
+        page = int(context.user_data.get("admin_logs_page", 0))
+        total_pages = int(context.user_data.get("admin_logs_total_pages", 1))
+        if data == "admin_logs_next":
+            page = min(page + 1, max(total_pages - 1, 0))
+        else:
+            page = max(page - 1, 0)
+        context.user_data["admin_logs_page"] = page
+        await admin_actions(type("obj", (), {"data": "admin_view_logs", "from_user": query.from_user})(), context)
+        return
+    if data == "admin_bot_stats":
+        # Игроки, активные за последние 24 часа
+        now = int(time.time())
+        day_ago = now - 86400
+        cur.execute("SELECT COUNT(*) as c FROM users")
+        total_users = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM users WHERE last_active >= ?", (day_ago,))
+        active_24h = cur.fetchone()["c"]
+        cur.execute("SELECT SUM(coins) as s FROM users")
+        total_coins = cur.fetchone()["s"] or 0
+        cur.execute("SELECT COUNT(*) as c FROM admin_logs")
+        total_logs = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM clans")
+        clan_count = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM clan_members")
+        clan_member_count = cur.fetchone()["c"]
+        text = (
+            "📈 Статистика бота\n\n"
+            f"👥 Всего пользователей: {format_num(total_users)}\n"
+            f"🟢 Активно за 24ч: {format_num(active_24h)}\n"
+            f"💰 Суммарно монет у игроков: {format_num(total_coins)}\n"
+            f"📜 Записей в журнале: {format_num(total_logs)}\n"
+            f"🏰 Кланов: {format_num(clan_count)} | Участников кланов: {format_num(clan_member_count)}\n"
+        )
+        await edit_section(
+            query,
+            caption=text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            ),
         )
         return
     if data == "admin_logs_search":
@@ -2526,8 +2613,8 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
-            for m in members[:10]  # Показываем только первых 10
+            f"👤 {m['username'] or f'ID{m['user_id']}'} ({m['role']}) - {m['contribution']} вклада"
+            for m in members[:10]
         ])
         
         text = (
@@ -2849,7 +2936,7 @@ async def clan_battle_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None
     
     # Создаём битву
     now = int(time.time())
-    prize = min(user_clan["experience"], opponent["experience"]) * 1000  # Приз основан на опыте
+    prize = max(1000, min(user_clan["experience"], opponent["experience"]) * 1000)  # Приз основан на опыте
     
     _execute(
         "INSERT INTO clan_battles (clan1_id, clan2_id, started_at, prize) VALUES (?,?,?,?)",
@@ -3096,6 +3183,88 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
+    if data == "autumn_collect":
+        uid = query.from_user.id
+        user = get_user(uid)
+        cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+        if not cur.fetchone()["autumn_event_active"]:
+            await edit_section(query, caption="❌ Событие выключено.", image_key="autumn")
+            return
+        now = int(time.time())
+        last = int(user["last_autumn_collect"] or 0)
+        if now - last < AUTUMN_COLLECT_COOLDOWN:
+            left = AUTUMN_COLLECT_COOLDOWN - (now - last)
+            h, r = divmod(left, 3600)
+            m = r // 60
+            await edit_section(
+                query,
+                caption=f"⏳ Ещё рано. Собирать можно через {h}ч {m}м.",
+                image_key="autumn",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
+                ),
+            )
+            return
+        gain = random.randint(5, 15)
+        update_user(uid, autumn_points=user["autumn_points"] + gain, last_autumn_collect=now)
+        log_user_action(uid, f"Собрал осенние листья +{gain}")
+        await edit_section(
+            query,
+            caption=f"🍁 Собрано очков: +{gain}. Текущие очки: {format_num(get_user(uid)['autumn_points'])}",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
+            ),
+        )
+        return
+    if data == "autumn_exchange":
+        uid = query.from_user.id
+        user = get_user(uid)
+        points = user["autumn_points"]
+        if points <= 0:
+            await edit_section(
+                query,
+                caption="❌ У вас нет очков осени.",
+                image_key="autumn",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
+                ),
+            )
+            return
+        # Курс обмена: 1 очко = 1000 монет
+        rate = 1000
+        coins_gain = points * rate
+        new_coins = min(get_user(uid)["coins"] + coins_gain, MAX_INT)
+        update_user(uid, coins=new_coins, weekly_coins=get_user(uid)["weekly_coins"] + coins_gain, autumn_points=0)
+        log_user_action(uid, f"Обменял {points} очков осени на {coins_gain}🪙")
+        await edit_section(
+            query,
+            caption=f"💱 Обмен успешно! +{format_num(coins_gain)}🪙. Очки осени: 0",
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
+            ),
+        )
+        return
+    if data == "autumn_top":
+        cur.execute("SELECT username, user_id, autumn_points FROM users ORDER BY autumn_points DESC LIMIT 10")
+        rows = cur.fetchall()
+        if not rows:
+            txt = "❌ Пока нет участников события."
+        else:
+            txt = "🏆 Топ Осени\n\n"
+            for i, row in enumerate(rows, 1):
+                name = row["username"] or f"ID{row['user_id']}"
+                txt += f"{i}. {name} — {format_num(row['autumn_points'])} очков\n"
+        await edit_section(
+            query,
+            caption=txt,
+            image_key="autumn",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
+            ),
+        )
+        return
     # ------------------- Промокоды -------------------
     if data == "promo":
         await promo_menu(query, context)
@@ -3224,6 +3393,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает все текстовые сообщения, не являющиеся командами."""
     user = update.effective_user
     txt = update.message.text if update.message else ""
+    # Фиксируем активность/ник
+    try:
+        update_user(user.id, last_active=int(time.time()), username=user.username or user.full_name or "")
+    except Exception:
+        pass
 
     # ------------------- Рассылка (админ) -------------------
     if context.user_data.get("awaiting_broadcast"):
@@ -3602,7 +3776,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Трейд (упрощённый пример) -------------------
     if txt.lower().startswith("/trade"):
-        await start_trade(query, context)   # функция start_trade реализована ниже
+        context.user_data["trade_state"] = {"step": 1}
+        await update.message.reply_text("🤝 Трейд: введите ID получателя (user_id).")
+        return
+    # Шаги трейда
+    if context.user_data.get("trade_state"):
+        await handle_trade_step(update, context)
         return
 
     # ------------------- Любой другой текст -------------------
