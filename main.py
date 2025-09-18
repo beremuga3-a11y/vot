@@ -31,6 +31,24 @@ from telegram.ext import (
     filters,
 )
 
+# Импорты из новых модулей
+from admin_log import (
+    admin_logs_view, admin_logs_search, admin_logs_stats, 
+    handle_logs_search, log_admin_action
+)
+from autumn_portal import (
+    autumn_portal_menu, autumn_games_menu, autumn_shop_menu,
+    autumn_daily_section, autumn_exchange, autumn_stats,
+    handle_autumn_game_input, handle_autumn_exchange_input,
+    buy_autumn_feed, buy_autumn_feed_normal, buy_autumn_feed_autumn,
+    buy_autumn_mask, buy_autumn_soup, buy_autumn_cake, 
+    buy_autumn_wreath, buy_autumn_antlers,
+    autumn_game_leaf, autumn_game_pumpkin, autumn_game_mushroom,
+    autumn_game_nut, autumn_game_leaves, autumn_game_deer,
+    autumn_game_wheat, autumn_game_apple, autumn_game_squirrel,
+    autumn_game_wind, autumn_game_eagle, autumn_game_stars
+)
+
 # ----------------------------------------------------------------------
 #   Конфигурация
 # ----------------------------------------------------------------------
@@ -346,6 +364,8 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "last_autumn_daily",
+        "autumn_coins",
     }
     for col in needed:
         if col not in existing:
@@ -490,13 +510,7 @@ def is_admin(user_id: int) -> bool:
 
 def log_user_action(user_id: int, action: str) -> None:
     """Записывает действие игрока в журнал админа."""
-    try:
-        _execute(
-            "INSERT INTO admin_logs (user_id, action, ts) VALUES (?,?,?)",
-            (user_id, action, int(time.time())),
-        )
-    except Exception as e:
-        log.error(f"Ошибка записи в журнал: {e}")
+    log_admin_action(user_id, action)
 
 
 # ----------------------------------------------------------------------
@@ -2000,34 +2014,6 @@ async def buy_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def buy_autumn_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = query.from_user.id
-    user = get_user(uid)
-    if user["coins"] < AUTUMN_FOOD_PRICE:
-        await edit_section(
-            query,
-            caption=f"❌ Недостаточно монет. Нужно {format_num(AUTUMN_FOOD_PRICE)}🪙.",
-            image_key="shop",
-        )
-        return
-    update_user(
-        uid,
-        coins=user["coins"] - AUTUMN_FOOD_PRICE,
-        autumn_feed=user["autumn_feed"] + 1,
-        weekly_coins=user["weekly_coins"] + AUTUMN_FOOD_PRICE,
-        reputation=user["reputation"] + 1,
-    )
-    log_user_action(uid, "+1 осенний корм")
-    await edit_section(
-        query,
-        caption=f"✅ +1 осенний корм за {format_num(AUTUMN_FOOD_PRICE)}🪙.",
-        image_key="shop",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ В магазин", callback_data="shop")]]
-        ),
-    )
-
-
 # ----------------------------------------------------------------------
 #   Осеннее событие (инфо + админ‑переключатель)
 # ----------------------------------------------------------------------
@@ -2372,65 +2358,13 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="✅ X‑ферма уже отсутствует.", image_key="admin")
         return
     if data == "admin_view_logs":
-        cur.execute(
-            "SELECT user_id, action, ts FROM admin_logs ORDER BY ts DESC LIMIT 20"
-        )
-        rows = cur.fetchall()
-        if not rows:
-            txt = "📜 Журнал пуст."
-        else:
-            txt = "📜 Последние действия игроков:\n"
-            for row in rows:
-                t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
-                txt += f"[{t}] ID {row['user_id']}: {row['action']}\n"
-        
-        btns = [
-            InlineKeyboardButton("🔍 Поиск по ID", callback_data="admin_logs_search"),
-            InlineKeyboardButton("📊 Статистика", callback_data="admin_logs_stats"),
-            InlineKeyboardButton("⬅️ Назад", callback_data="admin"),
-        ]
-        
-        await edit_section(
-            query,
-            caption=txt,
-            image_key="logs",
-            reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
-        )
+        await admin_logs_view(query, context)
         return
     if data == "admin_logs_search":
-        context.user_data["awaiting_logs_search"] = True
-        await edit_section(
-            query,
-            caption="🔍 Введите ID пользователя для поиска в журнале:",
-            image_key="logs",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_view_logs")]]
-            ),
-        )
+        await admin_logs_search(query, context)
         return
     if data == "admin_logs_stats":
-        cur.execute("SELECT COUNT(*) as count FROM admin_logs")
-        total_logs = cur.fetchone()["count"]
-        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs")
-        unique_users = cur.fetchone()["count"]
-        cur.execute("SELECT action, COUNT(*) as count FROM admin_logs GROUP BY action ORDER BY count DESC LIMIT 5")
-        top_actions = cur.fetchall()
-        
-        txt = f"📊 Статистика журнала:\n\n"
-        txt += f"• Всего записей: {total_logs}\n"
-        txt += f"• Уникальных пользователей: {unique_users}\n\n"
-        txt += "Топ-5 действий:\n"
-        for action in top_actions:
-            txt += f"• {action['action']}: {action['count']} раз\n"
-        
-        await edit_section(
-            query,
-            caption=txt,
-            image_key="logs",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_view_logs")]]
-            ),
-        )
+        await admin_logs_stats(query, context)
         return
     if data == "admin_create_promo":
         context.user_data["awaiting_create_promo"] = True
@@ -3079,6 +3013,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "buy_autumn_feed":
         await buy_autumn_feed(query, context)
         return
+    if data == "buy_autumn_feed_normal":
+        await buy_autumn_feed_normal(query, context)
+        return
+    if data == "buy_autumn_feed_autumn":
+        await buy_autumn_feed_autumn(query, context)
+        return
     # ------------------- Фермеры -------------------
     if data == "farmers_shop":
         await farmers_shop(query, context)
@@ -3091,10 +3031,82 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     # ------------------- Осеннее событие -------------------
     if data == "autumn_event":
-        await autumn_event_info(query, context)
+        await autumn_portal_menu(query, context)
         return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
+        return
+    # ------------------- Осенний портал -------------------
+    if data == "autumn_portal":
+        await autumn_portal_menu(query, context)
+        return
+    if data == "autumn_games":
+        await autumn_games_menu(query, context)
+        return
+    if data == "autumn_shop":
+        await autumn_shop_menu(query, context)
+        return
+    if data == "autumn_daily":
+        await autumn_daily_section(query, context)
+        return
+    if data == "autumn_exchange":
+        await autumn_exchange(query, context)
+        return
+    if data == "autumn_stats":
+        await autumn_stats(query, context)
+        return
+    # ------------------- Осенние игры -------------------
+    if data == "autumn_game_leaf":
+        await autumn_game_leaf(query, context)
+        return
+    if data == "autumn_game_pumpkin":
+        await autumn_game_pumpkin(query, context)
+        return
+    if data == "autumn_game_mushroom":
+        await autumn_game_mushroom(query, context)
+        return
+    if data == "autumn_game_nut":
+        await autumn_game_nut(query, context)
+        return
+    if data == "autumn_game_leaves":
+        await autumn_game_leaves(query, context)
+        return
+    if data == "autumn_game_deer":
+        await autumn_game_deer(query, context)
+        return
+    if data == "autumn_game_wheat":
+        await autumn_game_wheat(query, context)
+        return
+    if data == "autumn_game_apple":
+        await autumn_game_apple(query, context)
+        return
+    if data == "autumn_game_squirrel":
+        await autumn_game_squirrel(query, context)
+        return
+    if data == "autumn_game_wind":
+        await autumn_game_wind(query, context)
+        return
+    if data == "autumn_game_eagle":
+        await autumn_game_eagle(query, context)
+        return
+    if data == "autumn_game_stars":
+        await autumn_game_stars(query, context)
+        return
+    # ------------------- Осенний магазин -------------------
+    if data == "buy_autumn_mask":
+        await buy_autumn_mask(query, context)
+        return
+    if data == "buy_autumn_soup":
+        await buy_autumn_soup(query, context)
+        return
+    if data == "buy_autumn_cake":
+        await buy_autumn_cake(query, context)
+        return
+    if data == "buy_autumn_wreath":
+        await buy_autumn_wreath(query, context)
+        return
+    if data == "buy_autumn_antlers":
+        await buy_autumn_antlers(query, context)
         return
     # ------------------- Промокоды -------------------
     if data == "promo":
@@ -3394,29 +3406,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Поиск по журналу -------------------
     if context.user_data.get("awaiting_logs_search"):
-        if not txt.isdigit():
-            await update.message.reply_text("❌ Введите числовой ID пользователя.")
-            return
-        
-        user_id = int(txt)
-        cur.execute(
-            "SELECT action, ts FROM admin_logs WHERE user_id = ? ORDER BY ts DESC LIMIT 20",
-            (user_id,)
-        )
-        rows = cur.fetchall()
-        
-        if not rows:
-            await update.message.reply_text(f"❌ Действия пользователя {user_id} не найдены в журнале.")
-            context.user_data["awaiting_logs_search"] = False
-            return
-        
-        txt_result = f"📜 Действия пользователя {user_id}:\n\n"
-        for row in rows:
-            t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
-            txt_result += f"[{t}] {row['action']}\n"
-        
-        await update.message.reply_text(txt_result)
-        context.user_data["awaiting_logs_search"] = False
+        await handle_logs_search(update, context)
+        return
+
+    # ------------------- Осенние игры -------------------
+    if context.user_data.get("autumn_game"):
+        await handle_autumn_game_input(update, context)
+        return
+
+    # ------------------- Обмен осенних монет -------------------
+    if context.user_data.get("awaiting_autumn_exchange"):
+        await handle_autumn_exchange_input(update, context)
         return
 
     # ------------------- Казино -------------------
