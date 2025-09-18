@@ -51,7 +51,7 @@ CHANNEL_LINK = "https://t.me/spiderfarminfo"
 
 # Картинки
 MAIN_MENU_IMG = "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"
-AUTUMN_EVENT_IMG = "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"
+AUTUMN_EVENT_IMG = "https://i.postimg.cc/6qh5THc7/autumn_portal.jpg"
 
 # ----------------------------------------------------------------------
 #   Изображения для разделов 
@@ -65,9 +65,9 @@ SECTION_IMAGES: Dict[str, str] = {
     "coins": "https://i.postimg.cc/SxnCk0JH/5355070803995130993.jpg",
     "casino": "https://i.postimg.cc/zvZBKMj2/5355070803995131009.jpg",
     "promo": "https://i.postimg.cc/kXCG50DB/5355070803995131030.jpg",
-    "autumn": AUTUMN_EVENT_IMG,
+    "autumn": "https://i.postimg.cc/6qh5THc7/autumn_portal.jpg",
     "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
-    "logs": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
+    "logs": "https://i.postimg.cc/6qh5THc7/autumn_portal.jpg",
     "top": "https://i.postimg.cc/mg2rY7Y4/5355070803995131023.jpg",
 }
 # ----------------------------------------------------------------------
@@ -1414,7 +1414,10 @@ async def feed_animal_step(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         feed_type_btns.append(
             InlineKeyboardButton("🍎 Обычный корм", callback_data="feed_type_normal")
         )
-    if user["autumn_feed"] > 0:
+    # Проверяем, активно ли осеннее событие и есть ли осенний корм
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    autumn_active = cur.fetchone()["autumn_event_active"]
+    if user["autumn_feed"] > 0 and autumn_active:
         feed_type_btns.append(
             InlineKeyboardButton("🍂 Осенний корм", callback_data="feed_type_autumn")
         )
@@ -1460,6 +1463,21 @@ async def feed_animal_step(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def feed_type_chosen(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатываем выбор типа корма (обычный/осенний)."""
     feed_type = query.data.split("_")[-1]          # normal / autumn
+    
+    # Проверяем, активно ли осеннее событие для осеннего корма
+    if feed_type == "autumn":
+        cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+        if not cur.fetchone()["autumn_event_active"]:
+            await edit_section(
+                query,
+                caption="❌ Осеннее событие неактивно. Осенний корм недоступен.",
+                image_key="farm",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Назад", callback_data="farm")]]
+                ),
+            )
+            return
+    
     context.user_data["feed_type"] = feed_type
     await edit_section(
         query,
@@ -1499,6 +1517,19 @@ async def feed_animal(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             await edit_section(
                 query,
                 caption="❌ Нет осеннего корма!",
+                image_key="farm",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Назад", callback_data="farm")]]
+                ),
+            )
+            return
+        
+        # Проверяем, активно ли осеннее событие
+        cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+        if not cur.fetchone()["autumn_event_active"]:
+            await edit_section(
+                query,
+                caption="❌ Осеннее событие неактивно. Осенний корм недоступен.",
                 image_key="farm",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("⬅️ Назад", callback_data="farm")]]
@@ -2003,6 +2034,17 @@ async def buy_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def buy_autumn_feed(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     user = get_user(uid)
+    
+    # Проверяем, активно ли осеннее событие
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    if not cur.fetchone()["autumn_event_active"]:
+        await edit_section(
+            query,
+            caption="❌ Осеннее событие неактивно. Осенний корм недоступен.",
+            image_key="shop",
+        )
+        return
+    
     if user["coins"] < AUTUMN_FOOD_PRICE:
         await edit_section(
             query,
@@ -2043,13 +2085,16 @@ async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Стоимость осеннего корма – {format_num(AUTUMN_FOOD_PRICE)}🪙.\n"
         "• Бонус активен только пока событие включено администратором."
     )
+    # Добавляем кнопку для админов
+    btns = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+    if is_admin(query.from_user.id):
+        btns.append([InlineKeyboardButton("🔄 Переключить событие", callback_data="admin_toggle_autumn")])
+    
     await edit_section(
         query,
         caption=text,
         image_key="autumn",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        ),
+        reply_markup=InlineKeyboardMarkup(btns),
     )
 
 
@@ -2069,7 +2114,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
     cur.execute("SELECT user_id FROM users")
     for (uid,) in cur.fetchall():
         try:
-            context.bot.send_message(uid, txt)
+            await context.bot.send_message(uid, txt)
         except Exception:
             pass
     await edit_section(
@@ -2077,7 +2122,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
         caption=f"🍂 Осеннее событие {('включено' if new_val else 'выключено')}.",
         image_key="autumn",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_event")]]
         ),
     )
 
@@ -2409,6 +2454,7 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     if data == "admin_logs_stats":
+        # Статистика журнала
         cur.execute("SELECT COUNT(*) as count FROM admin_logs")
         total_logs = cur.fetchone()["count"]
         cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs")
@@ -2416,10 +2462,39 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         cur.execute("SELECT action, COUNT(*) as count FROM admin_logs GROUP BY action ORDER BY count DESC LIMIT 5")
         top_actions = cur.fetchall()
         
-        txt = f"📊 Статистика журнала:\n\n"
+        # Статистика игроков
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cur.fetchone()["count"]
+        
+        # Активные пользователи (за последние 7 дней)
+        week_ago = int(time.time()) - (7 * 24 * 60 * 60)
+        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs WHERE ts > ?", (week_ago,))
+        active_users = cur.fetchone()["count"]
+        
+        # Пользователи с монетами
+        cur.execute("SELECT COUNT(*) as count FROM users WHERE coins > 0")
+        users_with_coins = cur.fetchone()["count"]
+        
+        # Топ пользователи по монетам
+        cur.execute("SELECT user_id, username, coins FROM users ORDER BY coins DESC LIMIT 3")
+        top_users = cur.fetchall()
+        
+        txt = f"📊 Статистика бота:\n\n"
+        txt += f"👥 Игроки:\n"
+        txt += f"• Всего пользователей: {total_users}\n"
+        txt += f"• Активных (7 дней): {active_users}\n"
+        txt += f"• С монетами: {users_with_coins}\n\n"
+        
+        txt += f"📜 Журнал:\n"
         txt += f"• Всего записей: {total_logs}\n"
         txt += f"• Уникальных пользователей: {unique_users}\n\n"
-        txt += "Топ-5 действий:\n"
+        
+        txt += "🏆 Топ-3 игрока:\n"
+        for i, user in enumerate(top_users, 1):
+            username = user['username'] or f"ID{user['user_id']}"
+            txt += f"{i}. {username}: {format_num(user['coins'])}🪙\n"
+        
+        txt += "\n🔥 Топ-5 действий:\n"
         for action in top_actions:
             txt += f"• {action['action']}: {action['count']} раз\n"
         
