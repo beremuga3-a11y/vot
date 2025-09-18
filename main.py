@@ -319,6 +319,34 @@ def init_db() -> None:
         );
         """
     )
+    # ---------- achievements ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS achievements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            achievement_id TEXT,
+            unlocked_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        );
+        """
+    )
+    # ---------- daily_challenges ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            challenge_type TEXT,
+            target_value INTEGER,
+            current_value INTEGER DEFAULT 0,
+            reward_coins INTEGER,
+            completed INTEGER DEFAULT 0,
+            created_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        );
+        """
+    )
     conn.commit()
 
 
@@ -572,6 +600,200 @@ def delete_pet_last_fed(user_id: int, pet_field: str) -> None:
         "DELETE FROM pet_last_fed WHERE user_id = ? AND pet_field = ?",
         (user_id, pet_field),
     )
+
+
+# ----------------------------------------------------------------------
+#   Система достижений
+# ----------------------------------------------------------------------
+def check_achievements(user_id: int) -> List[Dict]:
+    """Проверяет и разблокирует достижения для пользователя."""
+    user = get_user(user_id)
+    unlocked = []
+    
+    # Получаем уже разблокированные достижения
+    cur.execute("SELECT achievement_id FROM achievements WHERE user_id = ?", (user_id,))
+    unlocked_achievements = {row["achievement_id"] for row in cur.fetchall()}
+    
+    for achievement_id, achievement in ACHIEVEMENTS.items():
+        if achievement_id not in unlocked_achievements:
+            if achievement["condition"](user):
+                # Разблокируем достижение
+                _execute(
+                    "INSERT INTO achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)",
+                    (user_id, achievement_id, int(time.time()))
+                )
+                
+                # Даём награду
+                reward = achievement["reward"]
+                update_user(
+                    user_id,
+                    coins=user["coins"] + reward,
+                    weekly_coins=user["weekly_coins"] + reward
+                )
+                
+                unlocked.append({
+                    "id": achievement_id,
+                    "title": achievement["title"],
+                    "description": achievement["description"],
+                    "reward": reward,
+                    "icon": achievement["icon"]
+                })
+                
+                log_user_action(user_id, f"Разблокировано достижение: {achievement['title']}")
+    
+    return unlocked
+
+
+def get_user_achievements(user_id: int) -> List[Dict]:
+    """Получает все достижения пользователя."""
+    cur.execute(
+        "SELECT a.achievement_id, a.unlocked_at FROM achievements a WHERE a.user_id = ? ORDER BY a.unlocked_at DESC",
+        (user_id,)
+    )
+    achievements = []
+    for row in cur.fetchall():
+        achievement_id = row["achievement_id"]
+        if achievement_id in ACHIEVEMENTS:
+            achievement = ACHIEVEMENTS[achievement_id]
+            achievements.append({
+                "id": achievement_id,
+                "title": achievement["title"],
+                "description": achievement["description"],
+                "reward": achievement["reward"],
+                "icon": achievement["icon"],
+                "unlocked_at": row["unlocked_at"]
+            })
+    return achievements
+
+
+def get_achievement_progress(user_id: int) -> Dict[str, Dict]:
+    """Получает прогресс по всем достижениям."""
+    user = get_user(user_id)
+    progress = {}
+    
+    # Получаем уже разблокированные достижения
+    cur.execute("SELECT achievement_id FROM achievements WHERE user_id = ?", (user_id,))
+    unlocked_achievements = {row["achievement_id"] for row in cur.fetchall()}
+    
+    for achievement_id, achievement in ACHIEVEMENTS.items():
+        is_unlocked = achievement_id in unlocked_achievements
+        progress[achievement_id] = {
+            "title": achievement["title"],
+            "description": achievement["description"],
+            "icon": achievement["icon"],
+            "reward": achievement["reward"],
+            "unlocked": is_unlocked
+        }
+    
+    return progress
+
+
+# ----------------------------------------------------------------------
+#   Ежедневные вызовы
+# ----------------------------------------------------------------------
+def create_daily_challenge(user_id: int) -> Dict:
+    """Создаёт новый ежедневный вызов для пользователя."""
+    challenges = [
+        {
+            "type": "buy_pets",
+            "target": random.randint(5, 20),
+            "reward": random.randint(10000, 50000),
+            "description": f"Купить {random.randint(5, 20)} питомцев"
+        },
+        {
+            "type": "earn_coins",
+            "target": random.randint(100000, 1000000),
+            "reward": random.randint(20000, 100000),
+            "description": f"Заработать {format_num(random.randint(100000, 1000000))} монет"
+        },
+        {
+            "type": "click_count",
+            "target": random.randint(50, 200),
+            "reward": random.randint(5000, 25000),
+            "description": f"Сделать {random.randint(50, 200)} кликов"
+        },
+        {
+            "type": "feed_pets",
+            "target": random.randint(10, 50),
+            "reward": random.randint(15000, 75000),
+            "description": f"Покормить питомцев {random.randint(10, 50)} раз"
+        }
+    ]
+    
+    challenge = random.choice(challenges)
+    
+    # Удаляем старые вызовы пользователя
+    _execute("DELETE FROM daily_challenges WHERE user_id = ?", (user_id,))
+    
+    # Создаём новый вызов
+    _execute(
+        "INSERT INTO daily_challenges (user_id, challenge_type, target_value, reward_coins, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, challenge["type"], challenge["target"], challenge["reward"], int(time.time()))
+    )
+    
+    return {
+        "type": challenge["type"],
+        "target": challenge["target"],
+        "reward": challenge["reward"],
+        "description": challenge["description"]
+    }
+
+
+def get_daily_challenge(user_id: int) -> Dict | None:
+    """Получает текущий ежедневный вызов пользователя."""
+    cur.execute(
+        "SELECT * FROM daily_challenges WHERE user_id = ? AND completed = 0 ORDER BY created_at DESC LIMIT 1",
+        (user_id,)
+    )
+    row = cur.fetchone()
+    
+    if not row:
+        return None
+    
+    return {
+        "id": row["id"],
+        "type": row["challenge_type"],
+        "target": row["target_value"],
+        "current": row["current_value"],
+        "reward": row["reward_coins"],
+        "created_at": row["created_at"]
+    }
+
+
+def update_daily_challenge_progress(user_id: int, challenge_type: str, amount: int = 1) -> bool:
+    """Обновляет прогресс ежедневного вызова."""
+    challenge = get_daily_challenge(user_id)
+    if not challenge or challenge["type"] != challenge_type:
+        return False
+    
+    new_progress = challenge["current"] + amount
+    
+    # Обновляем прогресс
+    _execute(
+        "UPDATE daily_challenges SET current_value = ? WHERE id = ?",
+        (new_progress, challenge["id"])
+    )
+    
+    # Проверяем, завершён ли вызов
+    if new_progress >= challenge["target"]:
+        # Завершаем вызов
+        _execute(
+            "UPDATE daily_challenges SET completed = 1 WHERE id = ?",
+            (challenge["id"],)
+        )
+        
+        # Даём награду
+        user = get_user(user_id)
+        update_user(
+            user_id,
+            coins=user["coins"] + challenge["reward"],
+            weekly_coins=user["weekly_coins"] + challenge["reward"]
+        )
+        
+        log_user_action(user_id, f"Завершил ежедневный вызов: {challenge_type}, награда: {challenge['reward']}🪙")
+        return True
+    
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -940,7 +1162,173 @@ ANIMAL_CONFIG: List[Tuple[str, int, str, str, str, int, str]] = [
     ("ultimate_autumn", 100_000_000, "🍂", "Ультимативная Осень", "autumn",
         1_000_000_000_000_000,
         "Воплощение самой осени, её прикосновение превращает всё в золотые листья."),
+    # ------------------- COSMIC -------------------
+    ("cosmic_void", 200_000_000, "🌌", "Космическая Пустота", "cosmic",
+        2_000_000_000_000_000,
+        "Существо из межгалактической пустоты, поглощающее звёзды и создающее золото."),
+    ("stellar_giant", 300_000_000, "⭐", "Звёздный Гигант", "cosmic",
+        3_000_000_000_000_000,
+        "Гигантская звезда, каждое её дыхание создаёт новые галактики из золота."),
+    ("nebula_king", 400_000_000, "🌠", "Король Туманности", "cosmic",
+        4_000_000_000_000_000,
+        "Правитель космических туманностей, его корона сияет чистейшим золотом."),
+    ("galactic_emperor", 500_000_000, "👑", "Галактический Император", "cosmic",
+        5_000_000_000_000_000,
+        "Владыка всей галактики, его трон сделан из сжатых звёзд."),
+    ("universal_god", 600_000_000, "🌍", "Бог Вселенной", "cosmic",
+        6_000_000_000_000_000,
+        "Создатель всего сущего, каждое его слово превращается в золотые миры."),
+    ("infinity_beast", 700_000_000, "♾️", "Зверь Бесконечности", "cosmic",
+        7_000_000_000_000_000,
+        "Существо бесконечной силы, его существование нарушает законы физики."),
+    ("eternity_dragon", 800_000_000, "🐉", "Дракон Вечности", "cosmic",
+        8_000_000_000_000_000,
+        "Древнейший дракон, существующий с начала времён, его чешуя - сама вечность."),
+    ("omniverse_titan", 900_000_000, "🌐", "Титан Омниверса", "cosmic",
+        9_000_000_000_000_000,
+        "Существо, существующее во всех вселенных одновременно."),
+    ("absolute_zero", 1_000_000_000, "❄️", "Абсолютный Ноль", "cosmic",
+        10_000_000_000_000_000,
+        "Существо абсолютного холода, замораживающее время и пространство."),
+    ("infinite_light", 1_100_000_000, "💡", "Бесконечный Свет", "cosmic",
+        11_000_000_000_000_000,
+        "Источник всего света во вселенной, его сияние создаёт новые миры."),
+    # ------------------- TRANSCENDENT -------------------
+    ("transcendent_one", 2_000_000_000, "🔮", "Трансцендентный", "transcendent",
+        20_000_000_000_000_000,
+        "Существо, превосходящее все понятия существования."),
+    ("dimensional_lord", 2_500_000_000, "🌀", "Владыка Измерений", "transcendent",
+        25_000_000_000_000_000,
+        "Правитель всех измерений, его власть безгранична."),
+    ("reality_weaver", 3_000_000_000, "🕸️", "Ткач Реальности", "transcendent",
+        30_000_000_000_000_000,
+        "Существо, способное переплетать саму ткань реальности."),
+    ("concept_destroyer", 3_500_000_000, "💥", "Разрушитель Концепций", "transcendent",
+        35_000_000_000_000_000,
+        "Существо, способное уничтожить саму идею существования."),
+    ("existence_creator", 4_000_000_000, "✨", "Создатель Существования", "transcendent",
+        40_000_000_000_000_000,
+        "Существо, создающее само понятие существования."),
+    ("void_master", 4_500_000_000, "🌑", "Мастер Пустоты", "transcendent",
+        45_000_000_000_000_000,
+        "Владыка абсолютной пустоты, где не существует даже понятия 'ничего'."),
+    ("infinity_guardian", 5_000_000_000, "🛡️", "Страж Бесконечности", "transcendent",
+        50_000_000_000_000_000,
+        "Защитник самой концепции бесконечности."),
+    ("eternity_keeper", 5_500_000_000, "⏰", "Хранитель Вечности", "transcendent",
+        55_000_000_000_000_000,
+        "Существо, охраняющее само время."),
+    ("absolute_being", 6_000_000_000, "👁️", "Абсолютное Существо", "transcendent",
+        60_000_000_000_000_000,
+        "Единственное истинно существующее существо во всей реальности."),
+    ("the_ultimate", 10_000_000_000, "🌟", "Ультиматум", "transcendent",
+        100_000_000_000_000_000,
+        "Предел всех пределов, конец всех концов, начало всех начал."),
 ]
+
+# ----------------------------------------------------------------------
+#   Система достижений
+# ----------------------------------------------------------------------
+ACHIEVEMENTS = {
+    "first_pet": {
+        "title": "🐣 Первый питомец",
+        "description": "Купите своего первого питомца",
+        "condition": lambda user: sum(user[field] for field, *_ in ANIMAL_CONFIG) >= 1,
+        "reward": 1000,
+        "icon": "🐣"
+    },
+    "pet_collector": {
+        "title": "📦 Коллекционер",
+        "description": "Соберите 10 питомцев",
+        "condition": lambda user: sum(user[field] for field, *_ in ANIMAL_CONFIG) >= 10,
+        "reward": 10000,
+        "icon": "📦"
+    },
+    "pet_master": {
+        "title": "👑 Мастер питомцев",
+        "description": "Соберите 100 питомцев",
+        "condition": lambda user: sum(user[field] for field, *_ in ANIMAL_CONFIG) >= 100,
+        "reward": 100000,
+        "icon": "👑"
+    },
+    "millionaire": {
+        "title": "💰 Миллионер",
+        "description": "Накопите 1,000,000 монет",
+        "condition": lambda user: user["coins"] >= 1_000_000,
+        "reward": 50000,
+        "icon": "💰"
+    },
+    "billionaire": {
+        "title": "💎 Миллиардер",
+        "description": "Накопите 1,000,000,000 монет",
+        "condition": lambda user: user["coins"] >= 1_000_000_000,
+        "reward": 500000,
+        "icon": "💎"
+    },
+    "trillionaire": {
+        "title": "🏆 Триллионер",
+        "description": "Накопите 1,000,000,000,000 монет",
+        "condition": lambda user: user["coins"] >= 1_000_000_000_000,
+        "reward": 5_000_000,
+        "icon": "🏆"
+    },
+    "clicker": {
+        "title": "👆 Кликер",
+        "description": "Сделайте 100 кликов",
+        "condition": lambda user: user["click_count"] >= 100,
+        "reward": 5000,
+        "icon": "👆"
+    },
+    "click_master": {
+        "title": "⚡ Мастер кликов",
+        "description": "Сделайте 1000 кликов",
+        "condition": lambda user: user["click_count"] >= 1000,
+        "reward": 50000,
+        "icon": "⚡"
+    },
+    "rare_collector": {
+        "title": "✨ Коллекционер редких",
+        "description": "Соберите 5 редких питомцев",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "rare") >= 5,
+        "reward": 25000,
+        "icon": "✨"
+    },
+    "epic_collector": {
+        "title": "🌟 Коллекционер эпических",
+        "description": "Соберите 3 эпических питомца",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "epic") >= 3,
+        "reward": 100000,
+        "icon": "🌟"
+    },
+    "mystic_collector": {
+        "title": "🔮 Коллекционер мистических",
+        "description": "Соберите 2 мистических питомца",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "mystic") >= 2,
+        "reward": 500000,
+        "icon": "🔮"
+    },
+    "secret_collector": {
+        "title": "🎭 Коллекционер секретных",
+        "description": "Соберите 1 секретного питомца",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "secret") >= 1,
+        "reward": 1_000_000,
+        "icon": "🎭"
+    },
+    "cosmic_collector": {
+        "title": "🌌 Коллекционер космических",
+        "description": "Соберите 1 космического питомца",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "cosmic") >= 1,
+        "reward": 10_000_000,
+        "icon": "🌌"
+    },
+    "transcendent_collector": {
+        "title": "♾️ Коллекционер трансцендентных",
+        "description": "Соберите 1 трансцендентного питомца",
+        "condition": lambda user: sum(user[field] for field, _, _, _, rarity, _, _ in ANIMAL_CONFIG if rarity == "transcendent") >= 1,
+        "reward": 100_000_000,
+        "icon": "♾️"
+    }
+}
 
 # ----------------------------------------------------------------------
 #   Фермеры
@@ -1262,6 +1650,8 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("👨‍🌾 Фермеры", callback_data="farmers_shop"),
         InlineKeyboardButton("📊 Статус", callback_data="status"),
         InlineKeyboardButton("💰 Получить монеты", callback_data="get_coins"),
+        InlineKeyboardButton("🏆 Достижения", callback_data="achievements"),
+        InlineKeyboardButton("📅 Ежедневные вызовы", callback_data="daily_challenges"),
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
@@ -1735,6 +2125,196 @@ async def status_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ----------------------------------------------------------------------
+#   Достижения
+# ----------------------------------------------------------------------
+async def achievements_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отображает достижения пользователя."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    
+    # Получаем прогресс по достижениям
+    progress = get_achievement_progress(uid)
+    
+    # Разделяем на разблокированные и заблокированные
+    unlocked = []
+    locked = []
+    
+    for achievement_id, achievement_data in progress.items():
+        if achievement_data["unlocked"]:
+            unlocked.append((achievement_id, achievement_data))
+        else:
+            locked.append((achievement_id, achievement_data))
+    
+    # Сортируем по времени разблокировки (для разблокированных)
+    unlocked.sort(key=lambda x: x[1].get("unlocked_at", 0), reverse=True)
+    
+    text = "🏆 Достижения 🏆\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n"
+    
+    if unlocked:
+        text += f"✅ Разблокировано: {len(unlocked)}/{len(ACHIEVEMENTS)}\n\n"
+        text += "🎉 Ваши достижения:\n"
+        for achievement_id, achievement_data in unlocked[:5]:  # Показываем только первые 5
+            text += f"{achievement_data['icon']} {achievement_data['title']}\n"
+            text += f"   {achievement_data['description']}\n"
+            text += f"   Награда: {format_num(achievement_data['reward'])}🪙\n\n"
+        
+        if len(unlocked) > 5:
+            text += f"... и ещё {len(unlocked) - 5} достижений\n\n"
+    else:
+        text += "❌ У вас пока нет достижений\n\n"
+    
+    if locked:
+        text += "🔒 Доступные достижения:\n"
+        for achievement_id, achievement_data in locked[:3]:  # Показываем только первые 3
+            text += f"🔒 {achievement_data['title']}\n"
+            text += f"   {achievement_data['description']}\n"
+            text += f"   Награда: {format_num(achievement_data['reward'])}🪙\n\n"
+        
+        if len(locked) > 3:
+            text += f"... и ещё {len(locked) - 3} достижений\n"
+    
+    btns = [
+        InlineKeyboardButton("🔄 Проверить", callback_data="check_achievements"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="status",
+        reply_markup=kb,
+    )
+
+
+async def check_achievements_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Проверяет и показывает новые достижения."""
+    uid = query.from_user.id
+    
+    # Проверяем достижения
+    unlocked_achievements = check_achievements(uid)
+    
+    if unlocked_achievements:
+        text = "🎉 Новые достижения разблокированы!\n\n"
+        for achievement in unlocked_achievements:
+            text += f"{achievement['icon']} {achievement['title']}\n"
+            text += f"   {achievement['description']}\n"
+            text += f"   Награда: +{format_num(achievement['reward'])}🪙\n\n"
+    else:
+        text = "❌ Новых достижений пока нет.\nПродолжайте играть, чтобы разблокировать их!"
+    
+    btns = [
+        InlineKeyboardButton("🏆 Все достижения", callback_data="achievements"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="status",
+        reply_markup=kb,
+    )
+
+
+# ----------------------------------------------------------------------
+#   Ежедневные вызовы
+# ----------------------------------------------------------------------
+async def daily_challenges_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отображает ежедневные вызовы пользователя."""
+    uid = query.from_user.id
+    
+    # Получаем текущий вызов
+    challenge = get_daily_challenge(uid)
+    
+    if not challenge:
+        # Создаём новый вызов
+        challenge = create_daily_challenge(uid)
+    
+    text = "📅 Ежедневные вызовы 📅\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n"
+    
+    # Определяем тип вызова и его описание
+    challenge_descriptions = {
+        "buy_pets": "🛒 Купить питомцев",
+        "earn_coins": "💰 Заработать монеты",
+        "click_count": "👆 Сделать кликов",
+        "feed_pets": "🍎 Покормить питомцев"
+    }
+    
+    challenge_name = challenge_descriptions.get(challenge["type"], "❓ Неизвестный вызов")
+    progress = min(challenge["current"], challenge["target"])
+    progress_percent = (progress / challenge["target"]) * 100
+    
+    text += f"🎯 Текущий вызов:\n"
+    text += f"{challenge_name}\n"
+    text += f"Прогресс: {progress}/{challenge['target']} ({progress_percent:.1f}%)\n"
+    text += f"Награда: {format_num(challenge['reward'])}🪙\n\n"
+    
+    # Прогресс-бар
+    bar_length = 10
+    filled = int((progress / challenge["target"]) * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    text += f"Прогресс: [{bar}] {progress_percent:.1f}%\n\n"
+    
+    if progress >= challenge["target"]:
+        text += "🎉 Вызов завершён! Награда уже получена.\n"
+    else:
+        remaining = challenge["target"] - progress
+        text += f"⏳ Осталось: {remaining}\n"
+    
+    btns = [
+        InlineKeyboardButton("🔄 Новый вызов", callback_data="new_daily_challenge"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="status",
+        reply_markup=kb,
+    )
+
+
+async def new_daily_challenge_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Создаёт новый ежедневный вызов."""
+    uid = query.from_user.id
+    
+    # Создаём новый вызов
+    challenge = create_daily_challenge(uid)
+    
+    challenge_descriptions = {
+        "buy_pets": "🛒 Купить питомцев",
+        "earn_coins": "💰 Заработать монеты", 
+        "click_count": "👆 Сделать кликов",
+        "feed_pets": "🍎 Покормить питомцев"
+    }
+    
+    challenge_name = challenge_descriptions.get(challenge["type"], "❓ Неизвестный вызов")
+    
+    text = "🎯 Новый ежедневный вызов!\n\n"
+    text += f"{challenge_name}\n"
+    text += f"Цель: {challenge['target']}\n"
+    text += f"Награда: {format_num(challenge['reward'])}🪙\n\n"
+    text += "Удачи в выполнении!"
+    
+    btns = [
+        InlineKeyboardButton("📅 Мои вызовы", callback_data="daily_challenges"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    
+    await edit_section(
+        query,
+        caption=text,
+        image_key="status",
+        reply_markup=kb,
+    )
+
+
+# ----------------------------------------------------------------------
 #   Получить монеты (задания)
 # ----------------------------------------------------------------------
 async def get_coins_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1780,11 +2360,26 @@ async def task_click(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         weekly_coins=user["weekly_coins"] + reward,
         reputation=user["reputation"] + 1,
         click_reward_last=int(time.time()),
+        click_count=user["click_count"] + 1,
     )
     log_user_action(uid, f"Кликнул и получил {reward}🪙")
+    
+    # Проверяем достижения
+    unlocked_achievements = check_achievements(uid)
+    achievement_text = ""
+    if unlocked_achievements:
+        achievement_text = "\n\n🏆 Новые достижения:\n"
+        for achievement in unlocked_achievements:
+            achievement_text += f"{achievement['icon']} {achievement['title']} (+{format_num(achievement['reward'])}🪙)\n"
+    
+    # Обновляем прогресс ежедневных вызовов
+    challenge_completed = update_daily_challenge_progress(uid, "click_count", 1)
+    if challenge_completed:
+        achievement_text += "\n🎯 Ежедневный вызов завершён! Награда получена."
+    
     await edit_section(
         query,
-        caption=f"✨ Вы получили {format_num(reward)}🪙!",
+        caption=f"✨ Вы получили {format_num(reward)}🪙!" + achievement_text,
         image_key="coins",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
@@ -1957,10 +2552,25 @@ async def buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     update_user(uid, **upd)
     set_pet_last_fed(uid, field, int(time.time()))
     log_user_action(uid, f"Купил {qty} шт. {field} за {total_price}🪙")
+    
+    # Проверяем достижения
+    unlocked_achievements = check_achievements(uid)
+    achievement_text = ""
+    if unlocked_achievements:
+        achievement_text = "\n\n🏆 Новые достижения:\n"
+        for achievement in unlocked_achievements:
+            achievement_text += f"{achievement['icon']} {achievement['title']} (+{format_num(achievement['reward'])}🪙)\n"
+    
+    # Обновляем прогресс ежедневных вызовов
+    challenge_completed = update_daily_challenge_progress(uid, "buy_pets", qty)
+    if challenge_completed:
+        achievement_text += "\n🎯 Ежедневный вызов завершён! Награда получена."
+    
     await edit_section(
         query,
         caption=(
             f"🟢 Приобретено {qty} шт. {field}. Потрачено {format_num(total_price)}🪙."
+            + achievement_text
         ),
         image_key="shop",
         reply_markup=InlineKeyboardMarkup(
@@ -2526,7 +3136,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m.get('username') or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3043,6 +3653,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "status":
         await status_section(query, context)
         return
+    # ------------------- Достижения -------------------
+    if data == "achievements":
+        await achievements_section(query, context)
+        return
+    if data == "check_achievements":
+        await check_achievements_callback(query, context)
+        return
+    # ------------------- Ежедневные вызовы -------------------
+    if data == "daily_challenges":
+        await daily_challenges_section(query, context)
+        return
+    if data == "new_daily_challenge":
+        await new_daily_challenge_callback(query, context)
+        return
     # ------------------- Получить монеты -------------------
     if data == "get_coins":
         await get_coins_menu(query, context)
@@ -3383,7 +4007,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member['username'] or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
