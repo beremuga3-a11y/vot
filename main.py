@@ -14,7 +14,7 @@ import random
 import re
 import time
 import sqlite3
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 
 from telegram import (
     InlineKeyboardButton,
@@ -34,7 +34,7 @@ from telegram.ext import (
 # ----------------------------------------------------------------------
 #   Конфигурация
 # ----------------------------------------------------------------------
-TOKEN = "8137596673:AAGePL-4AZQHPIXLruyWkOQwDLfW_Hycudk"          # ваш токен
+TOKEN = "YOUR_BOT_TOKEN_HERE"          # замените на ваш токен
 DB_PATH = "farm_bot.db"
 MAX_INT = 9_223_372_036_854_775_807
 HUNGER_TIME = 10 * 3600          # 10 ч в секундах
@@ -403,7 +403,7 @@ def create_clan(name: str, leader_id: int) -> int:
     return clan_id
 
 
-def get_user_clan(user_id: int) -> sqlite3.Row | None:
+def get_user_clan(user_id: int) -> Union[sqlite3.Row, None]:
     """Возвращает клан пользователя."""
     cur.execute(
         "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
@@ -558,7 +558,7 @@ def set_pet_last_fed(user_id: int, pet_field: str, timestamp: int) -> None:
     )
 
 
-def get_pet_last_fed(user_id: int, pet_field: str) -> int | None:
+def get_pet_last_fed(user_id: int, pet_field: str) -> Union[int, None]:
     cur.execute(
         "SELECT last_fed FROM pet_last_fed WHERE user_id = ? AND pet_field = ?",
         (user_id, pet_field),
@@ -977,7 +977,7 @@ FARMER_IMAGES: Dict[str, str] = {
     "Титан‑фермер":            "https://i.postimg.cc/25LT5bXd/697384440.jpg",
     "Бог‑фермер":              "https://i.postimg.cc/3xsmnLnp/290306363.jpg",
 }
-def get_farmer(name: str) -> Tuple[str, int, int, str] | None:
+def get_farmer(name: str) -> Union[Tuple[str, int, int, str], None]:
     for rec in FARMER_CONFIG:
         if rec[0].lower() == name.lower():
             return rec
@@ -1240,7 +1240,7 @@ async def edit_section(
     query,
     caption: str,
     image_key: str,
-    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_markup: Union[InlineKeyboardMarkup, None] = None,
 ) -> None:
     """Редактирует сообщение, заменяя фото на фото из SECTION_IMAGES[image_key]."""
     img = SECTION_IMAGES.get(image_key, MAIN_MENU_IMG)  # fallback
@@ -2086,7 +2086,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
 #   Промокоды
 # ----------------------------------------------------------------------
 def add_promo(
-    code: str, coins: int, pet_field: str | None, pet_qty: int, max_uses: int
+    code: str, coins: int, pet_field: Union[str, None], pet_qty: int, max_uses: int
 ) -> None:
     """Создаёт промокод (может использоваться max_uses раз)."""
     _execute(
@@ -2099,7 +2099,7 @@ def add_promo(
     )
 
 
-def get_promo(code: str) -> sqlite3.Row | None:
+def get_promo(code: str) -> Union[sqlite3.Row, None]:
     cur.execute("SELECT * FROM promo_codes WHERE code = ?", (code,))
     return cur.fetchone()
 
@@ -2526,7 +2526,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m['username'] or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3383,7 +3383,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member['username'] or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
