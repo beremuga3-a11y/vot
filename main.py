@@ -1111,6 +1111,7 @@ async def check_clan_battles(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception:
                 pass
+            log_user_action(member["user_id"], f"Выиграл клановую битву #{battle['id']}, получил {prize_per_member}🪙")
         
         # Увеличиваем опыт клана-победителя
         _execute(
@@ -2287,6 +2288,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
         InlineKeyboardButton("🍂 Обнулить осенние монеты", callback_data="admin_reset_autumn"),
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
         InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
@@ -2387,6 +2389,9 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         btns = [
             InlineKeyboardButton("🔍 Поиск по ID", callback_data="admin_logs_search"),
             InlineKeyboardButton("📊 Статистика", callback_data="admin_logs_stats"),
+            InlineKeyboardButton("🕐 За день", callback_data="admin_logs_day"),
+            InlineKeyboardButton("📅 За неделю", callback_data="admin_logs_week"),
+            InlineKeyboardButton("🗑️ Очистить журнал", callback_data="admin_logs_clear"),
             InlineKeyboardButton("⬅️ Назад", callback_data="admin"),
         ]
         
@@ -2429,6 +2434,134 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_key="logs",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_view_logs")]]
+            ),
+        )
+        return
+    if data == "admin_logs_day":
+        day_ago = int(time.time()) - (24 * 60 * 60)
+        cur.execute(
+            "SELECT user_id, action, ts FROM admin_logs WHERE ts > ? ORDER BY ts DESC LIMIT 50",
+            (day_ago,)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            txt = "📜 За последние 24 часа действий не было."
+        else:
+            txt = "📜 Действия за последние 24 часа:\n"
+            for row in rows:
+                t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
+                txt += f"[{t}] ID {row['user_id']}: {row['action']}\n"
+        
+        await edit_section(
+            query,
+            caption=txt,
+            image_key="logs",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_view_logs")]]
+            ),
+        )
+        return
+    if data == "admin_logs_week":
+        week_ago = int(time.time()) - (7 * 24 * 60 * 60)
+        cur.execute(
+            "SELECT user_id, action, ts FROM admin_logs WHERE ts > ? ORDER BY ts DESC LIMIT 100",
+            (week_ago,)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            txt = "📜 За последнюю неделю действий не было."
+        else:
+            txt = "📜 Действия за последнюю неделю:\n"
+            for row in rows:
+                t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
+                txt += f"[{t}] ID {row['user_id']}: {row['action']}\n"
+        
+        await edit_section(
+            query,
+            caption=txt,
+            image_key="logs",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_view_logs")]]
+            ),
+        )
+        return
+    if data == "admin_logs_clear":
+        _execute("DELETE FROM admin_logs")
+        await edit_section(
+            query,
+            caption="✅ Журнал логов очищен.",
+            image_key="logs",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_view_logs")]]
+            ),
+        )
+        return
+    if data == "admin_bot_stats":
+        # Общая статистика пользователей
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cur.fetchone()["count"]
+        
+        # Активные пользователи (за последние 7 дней)
+        week_ago = int(time.time()) - (7 * 24 * 60 * 60)
+        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs WHERE ts > ?", (week_ago,))
+        active_users = cur.fetchone()["count"]
+        
+        # Активные пользователи за последние 24 часа
+        day_ago = int(time.time()) - (24 * 60 * 60)
+        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM admin_logs WHERE ts > ?", (day_ago,))
+        daily_active = cur.fetchone()["count"]
+        
+        # Статистика по монетам
+        cur.execute("SELECT SUM(coins) as total_coins, AVG(coins) as avg_coins FROM users")
+        coins_stats = cur.fetchone()
+        total_coins = coins_stats["total_coins"] or 0
+        avg_coins = coins_stats["avg_coins"] or 0
+        
+        # Топ пользователи по монетам
+        cur.execute("SELECT username, coins FROM users ORDER BY coins DESC LIMIT 5")
+        top_users = cur.fetchall()
+        
+        # Статистика кланов
+        cur.execute("SELECT COUNT(*) as count FROM clans")
+        total_clans = cur.fetchone()["count"]
+        
+        cur.execute("SELECT COUNT(*) as count FROM clan_members")
+        total_clan_members = cur.fetchone()["count"]
+        
+        # Статистика промокодов
+        cur.execute("SELECT COUNT(*) as count FROM promo_codes")
+        total_promos = cur.fetchone()["count"]
+        
+        cur.execute("SELECT SUM(uses) as total_uses FROM promo_codes")
+        promo_uses = cur.fetchone()["total_uses"] or 0
+        
+        txt = f"📊 Статистика бота\n"
+        txt += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        txt += f"👥 Пользователи:\n"
+        txt += f"• Всего зарегистрировано: {total_users}\n"
+        txt += f"• Активных за неделю: {active_users}\n"
+        txt += f"• Активных за день: {daily_active}\n\n"
+        txt += f"💰 Экономика:\n"
+        txt += f"• Всего монет в игре: {format_num(int(total_coins))}\n"
+        txt += f"• Среднее количество: {format_num(int(avg_coins))}\n\n"
+        txt += f"🏆 Топ-5 игроков:\n"
+        for i, user in enumerate(top_users, 1):
+            name = user["username"] or f"ID{user['user_id']}" if 'user_id' in user else f"Пользователь {i}"
+            txt += f"{i}. {name}: {format_num(user['coins'])}🪙\n"
+        
+        txt += f"\n⚔️ Кланы:\n"
+        txt += f"• Всего кланов: {total_clans}\n"
+        txt += f"• Участников: {total_clan_members}\n\n"
+        txt += f"🎟️ Промокоды:\n"
+        txt += f"• Всего создано: {total_promos}\n"
+        txt += f"• Использовано раз: {promo_uses}\n"
+        
+        await edit_section(
+            query,
+            caption=txt,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
             ),
         )
         return
@@ -2526,7 +2659,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m['username'] or f'ID{m['user_id']}'} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -2857,6 +2990,9 @@ async def clan_battle_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None
     )
     
     battle_id = cur.lastrowid
+    
+    # Логируем создание битвы
+    log_user_action(uid, f"Создал клановую битву #{battle_id} против клана {opponent['name']}")
     
     # Уведомляем участников обоих кланов
     for clan_id in [user_clan["id"], opponent_id]:
@@ -3214,6 +3350,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     )
                 except Exception:
                     pass
+                log_user_action(user.id, f"Зарегистрировался по реферальной ссылке от {ref_id}")
+                log_user_action(ref_id, f"Получил 500🪙 за приглашение пользователя {user.id}")
+            else:
+                log_user_action(user.id, "Зарегистрировался в боте")
+    else:
+        log_user_action(user.id, "Запустил бота")
     await show_main_menu(update, context, edit=False)
 
 
@@ -3383,7 +3525,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member['username'] or f'ID{member['user_id']}'}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
