@@ -31,6 +31,14 @@ from telegram.ext import (
     filters,
 )
 
+# Импорты модулей
+from fixes import (
+    autumn_portal_menu, autumn_games_menu, autumn_shop_menu, 
+    autumn_daily_section, autumn_exchange_menu,
+    handle_autumn_game, handle_autumn_buy, handle_autumn_exchange,
+    handle_autumn_claim_daily
+)
+
 # ----------------------------------------------------------------------
 #   Конфигурация
 # ----------------------------------------------------------------------
@@ -66,8 +74,8 @@ SECTION_IMAGES: Dict[str, str] = {
     "casino": "https://i.postimg.cc/zvZBKMj2/5355070803995131009.jpg",
     "promo": "https://i.postimg.cc/kXCG50DB/5355070803995131030.jpg",
     "autumn": AUTUMN_EVENT_IMG,
-    "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "logs": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
+    "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "top": "https://i.postimg.cc/mg2rY7Y4/5355070803995131023.jpg",
 }
 # ----------------------------------------------------------------------
@@ -346,6 +354,8 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "last_autumn_daily",
+        "autumn_coins",
     }
     for col in needed:
         if col not in existing:
@@ -1265,6 +1275,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
+        InlineKeyboardButton("🍂 Осенний портал", callback_data="autumn_portal"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
@@ -3096,6 +3107,42 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
+    # ------------------- Осенний портал -------------------
+    if data == "autumn_portal":
+        await autumn_portal_menu(query, context, get_user, update_user, edit_section, chunk_buttons, format_num, is_admin)
+        return
+    if data == "autumn_games":
+        await autumn_games_menu(query, context, edit_section, chunk_buttons, format_num)
+        return
+    if data == "autumn_shop":
+        await autumn_shop_menu(query, context, edit_section, chunk_buttons, format_num)
+        return
+    if data == "autumn_daily":
+        await autumn_daily_section(query, context, get_user, edit_section, chunk_buttons)
+        return
+    if data == "autumn_exchange":
+        await autumn_exchange_menu(query, context, get_user, edit_section, chunk_buttons, format_num)
+        return
+    if data == "autumn_claim_daily":
+        await handle_autumn_claim_daily(query, context, get_user, update_user, edit_section, chunk_buttons, log_user_action)
+        return
+    # Осенние игры
+    if data.startswith("autumn_game_"):
+        game_type = data.split("_")[2]
+        await handle_autumn_game(query, context, game_type, get_user, update_user, edit_section, chunk_buttons, format_num, log_user_action)
+        return
+    # Осенний магазин
+    if data.startswith("autumn_buy_"):
+        parts = data.split("_")
+        item_type = parts[2]
+        amount = int(parts[3])
+        await handle_autumn_buy(query, context, item_type, amount, get_user, update_user, edit_section, chunk_buttons, format_num, log_user_action)
+        return
+    # Обмен монет
+    if data.startswith("autumn_exchange_"):
+        exchange_type = data.split("_")[2]
+        await handle_autumn_exchange(query, context, exchange_type, get_user, update_user, edit_section, chunk_buttons, format_num, log_user_action)
+        return
     # ------------------- Промокоды -------------------
     if data == "promo":
         await promo_menu(query, context)
@@ -3394,29 +3441,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Поиск по журналу -------------------
     if context.user_data.get("awaiting_logs_search"):
-        if not txt.isdigit():
-            await update.message.reply_text("❌ Введите числовой ID пользователя.")
-            return
-        
-        user_id = int(txt)
-        cur.execute(
-            "SELECT action, ts FROM admin_logs WHERE user_id = ? ORDER BY ts DESC LIMIT 20",
-            (user_id,)
-        )
-        rows = cur.fetchall()
-        
-        if not rows:
-            await update.message.reply_text(f"❌ Действия пользователя {user_id} не найдены в журнале.")
+        try:
+            user_id = int(txt.strip())
+            cur.execute(
+                "SELECT user_id, action, ts FROM admin_logs WHERE user_id = ? ORDER BY ts DESC LIMIT 20",
+                (user_id,)
+            )
+            rows = cur.fetchall()
+            
+            if not rows:
+                txt_result = f"📜 Записи для пользователя ID {user_id} не найдены."
+            else:
+                txt_result = f"📜 Записи для пользователя ID {user_id}:\n"
+                for row in rows:
+                    t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
+                    txt_result += f"[{t}] {row['action']}\n"
+            
+            btns = [
+                InlineKeyboardButton("🔍 Новый поиск", callback_data="admin_logs_search"),
+                InlineKeyboardButton("⬅️ Назад к журналу", callback_data="admin_view_logs"),
+            ]
+            
+            await update.message.reply_photo(
+                photo=IMAGES.get("logs", "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"),
+                caption=txt_result,
+                reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+            )
+            
             context.user_data["awaiting_logs_search"] = False
-            return
-        
-        txt_result = f"📜 Действия пользователя {user_id}:\n\n"
-        for row in rows:
-            t = time.strftime("%d.%m %H:%M", time.localtime(row["ts"]))
-            txt_result += f"[{t}] {row['action']}\n"
-        
-        await update.message.reply_text(txt_result)
-        context.user_data["awaiting_logs_search"] = False
+            
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат ID. Введите число.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+            context.user_data["awaiting_logs_search"] = False
         return
 
     # ------------------- Казино -------------------
@@ -3788,6 +3846,8 @@ def main() -> None:
         log.info("Миграция завершена, колонки добавлены.")
         return
     add_admins()
+    
+    
     app = ApplicationBuilder().token(TOKEN).build()
     # Основные команды
     app.add_handler(CommandHandler("start", start_command))
