@@ -2272,6 +2272,61 @@ async def farmer_buy_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ----------------------------------------------------------------------
+#   Восстановление питомцев
+# ----------------------------------------------------------------------
+def restore_pets_from_hunger() -> int:
+    """
+    Восстанавливает питомцев, которые исчезли из-за голода за последние 48 часов.
+    Возвращает количество восстановленных питомцев.
+    """
+    current_time = int(time.time())
+    restore_time_limit = current_time - (48 * 3600)  # 48 часов назад
+    
+    # Получаем всех пользователей
+    cur.execute("SELECT user_id FROM users")
+    users = cur.fetchall()
+    
+    total_restored = 0
+    
+    for (user_id,) in users:
+        user = get_user(user_id)
+        
+        # Проверяем каждое животное
+        for field, _, _, _, _, _, _ in ANIMAL_CONFIG:
+            # Если у пользователя сейчас 0 животных этого типа
+            if user[field] == 0:
+                # Проверяем, есть ли запись о том, что животные были потеряны из-за голода
+                # в журнале действий за последние 48 часов
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM user_actions 
+                    WHERE user_id = ? AND action LIKE ? AND timestamp > ?
+                    """,
+                    (user_id, f"%Потеряно всех {field} из‑за голода%", restore_time_limit)
+                )
+                
+                hunger_log_count = cur.fetchone()[0]
+                
+                if hunger_log_count > 0:
+                    # Восстанавливаем животных (берем среднее количество из последних покупок)
+                    # Для простоты восстанавливаем 1 животное каждого типа
+                    restored_count = 1
+                    
+                    # Обновляем количество животных
+                    update_user(user_id, **{field: restored_count})
+                    
+                    # Устанавливаем время последнего кормления на текущее время
+                    set_pet_last_fed(user_id, field, current_time)
+                    
+                    # Логируем восстановление
+                    log_user_action(user_id, f"Восстановлено {restored_count} {field} после голода (админ)")
+                    
+                    total_restored += restored_count
+    
+    return total_restored
+
+
+# ----------------------------------------------------------------------
 #   Админ‑панель
 # ----------------------------------------------------------------------
 async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2285,6 +2340,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("🕷️ Выдать паука‑секрета", callback_data="admin_give_spider"),
         InlineKeyboardButton("💰 Выдать монеты", callback_data="admin_set_coins"),
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
+        InlineKeyboardButton("🐾 Восстановить питомцев", callback_data="admin_restore_pets"),
         InlineKeyboardButton("🍂 Обнулить осенние монеты", callback_data="admin_reset_autumn"),
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
@@ -2509,6 +2565,14 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_clans")]]
             ),
+        )
+        return
+    if data == "admin_restore_pets":
+        restored_count = restore_pets_from_hunger()
+        await edit_section(
+            query, 
+            caption=f"🐾 Восстановлено {restored_count} питомцев, которые исчезли из-за голода за последние 48 часов.", 
+            image_key="admin"
         )
         return
     await edit_section(query, caption="❓ Неизвестная команда.", image_key="admin")
