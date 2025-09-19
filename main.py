@@ -159,7 +159,9 @@ def init_db() -> None:
             subscribe_claimed INTEGER DEFAULT 0,
             chat_claimed INTEGER DEFAULT 0,
             click_reward_last INTEGER DEFAULT 0,
-            referred_by INTEGER DEFAULT 0
+            referred_by INTEGER DEFAULT 0,
+            first_seen INTEGER DEFAULT 0,
+            last_seen INTEGER DEFAULT 0
         );
         """
     )
@@ -346,6 +348,8 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "first_seen",
+        "last_seen",
     }
     for col in needed:
         if col not in existing:
@@ -533,10 +537,15 @@ def get_user(user_id: int) -> sqlite3.Row:
     """Возвращает запись пользователя, создаёт её при необходимости."""
     cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
+    now = int(time.time())
     if not row:
-        _execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+        _execute("INSERT INTO users (user_id, first_seen, last_seen) VALUES (?, ?, ?)", 
+                (user_id, now, now))
         cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
+    else:
+        # Обновляем last_seen
+        _execute("UPDATE users SET last_seen = ? WHERE user_id = ?", (now, user_id))
     # «Летучее» добавление новых колонок, если они вдруг появятся позже
     for field, *_ in ANIMAL_CONFIG:
         if field not in row.keys():
@@ -2279,6 +2288,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
         return
     btns = [
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
@@ -2307,6 +2317,69 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     if not is_admin(uid):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    if data == "admin_bot_stats":
+        now = int(time.time())
+        
+        # Общее количество игроков
+        cur.execute("SELECT COUNT(*) as total FROM users")
+        total_users = cur.fetchone()["total"]
+        
+        # Игроки за последние 24 часа
+        cur.execute("SELECT COUNT(*) as count FROM users WHERE last_seen > ?", (now - 86400,))
+        daily_users = cur.fetchone()["count"]
+        
+        # Игроки за последний час
+        cur.execute("SELECT COUNT(*) as count FROM users WHERE last_seen > ?", (now - 3600,))
+        hourly_users = cur.fetchone()["count"]
+        
+        # Новые игроки за 24 часа
+        cur.execute("SELECT COUNT(*) as count FROM users WHERE first_seen > ?", (now - 86400,))
+        new_daily_users = cur.fetchone()["count"]
+        
+        # Общее количество монет в обороте
+        cur.execute("SELECT SUM(coins) as total_coins FROM users")
+        total_coins = cur.fetchone()["total_coins"] or 0
+        
+        # Средний доход на игрока
+        cur.execute("SELECT AVG(coins) as avg_coins FROM users WHERE coins > 0")
+        avg_coins = int(cur.fetchone()["avg_coins"] or 0)
+        
+        # Топ-3 богатых игроков
+        cur.execute("SELECT user_id, username, coins FROM users ORDER BY coins DESC LIMIT 3")
+        top_rich = cur.fetchall()
+        
+        # Количество кланов
+        cur.execute("SELECT COUNT(*) as count FROM clans")
+        total_clans = cur.fetchone()["count"]
+        
+        text = (
+            f"📊 **Статистика бота**\n\n"
+            f"👥 **Игроки:**\n"
+            f"• Всего игроков: {format_num(total_users)}\n"
+            f"• Активны за 24ч: {format_num(daily_users)} ({round(daily_users/max(total_users,1)*100, 1)}%)\n"
+            f"• Активны за 1ч: {format_num(hourly_users)} ({round(hourly_users/max(total_users,1)*100, 1)}%)\n"
+            f"• Новых за 24ч: {format_num(new_daily_users)}\n\n"
+            f"💰 **Экономика:**\n"
+            f"• Всего монет: {format_num(total_coins)}🪙\n"
+            f"• Средний баланс: {format_num(avg_coins)}🪙\n\n"
+            f"🏆 **Топ-3 богатых:**\n"
+        )
+        
+        for i, player in enumerate(top_rich, 1):
+            name = player["username"] or f"ID{player['user_id']}"
+            text += f"{i}. {name}: {format_num(player['coins'])}🪙\n"
+        
+        text += f"\n⚔️ **Кланы:** {total_clans}"
+        
+        await edit_section(
+            query,
+            caption=text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            ),
+        )
         return
     if data == "admin_reset_top":
         _execute(
@@ -2999,6 +3072,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
     data = query.data
+    
+    # Обновляем username при каждом взаимодействии
+    user = query.from_user
+    if user.username:
+        update_user(user.id, username=user.username)
     # ------------------- Универсальная «Назад» -------------------
     if data == "back":
         await show_main_menu(update, context, edit=True)
@@ -3190,6 +3268,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     txt = update.message.text if update.message else ""
     user = update.effective_user
     db_user = get_user(user.id)
+    # Обновляем username
+    if user.username:
+        update_user(user.id, username=user.username)
     # Проверяем, не наступил ли новый сезон
     check_and_reset_season()
     # Реферальный параметр: /start <ref_id>
@@ -3224,6 +3305,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает все текстовые сообщения, не являющиеся командами."""
     user = update.effective_user
     txt = update.message.text if update.message else ""
+    
+    # Обновляем username если он есть
+    if user.username:
+        update_user(user.id, username=user.username)
 
     # ------------------- Рассылка (админ) -------------------
     if context.user_data.get("awaiting_broadcast"):
