@@ -69,6 +69,7 @@ SECTION_IMAGES: Dict[str, str] = {
     "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "logs": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "top": "https://i.postimg.cc/mg2rY7Y4/5355070803995131023.jpg",
+    "tickets": "https://i.postimg.cc/9f9wP3cS/Support.jpg",
 }
 # ----------------------------------------------------------------------
 #   Картинки питомцев ← NEW
@@ -319,6 +320,32 @@ def init_db() -> None:
         );
         """
     )
+    # ---------- support_tickets ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            category TEXT DEFAULT 'general',
+            text TEXT NOT NULL,
+            status TEXT DEFAULT 'open',
+            created_at INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
+        );
+        """
+    )
+    # ---------- support_replies ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS support_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            admin_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            created_at INTEGER DEFAULT 0
+        );
+        """
+    )
     conn.commit()
 
 
@@ -346,6 +373,7 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "last_daily_time",
     }
     for col in needed:
         if col not in existing:
@@ -1251,6 +1279,167 @@ async def edit_section(
 
 
 # ----------------------------------------------------------------------
+#   Поддержка (тикеты)
+# ----------------------------------------------------------------------
+async def support_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    txt = (
+        "🆘 Поддержка\n"
+        "Опишите проблему или задайте вопрос. Админы ответят в личные сообщения."
+    )
+    btns = [
+        InlineKeyboardButton("📝 Создать заявку", callback_data="support_create"),
+        InlineKeyboardButton("📂 Мои заявки", callback_data="support_my"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=1))
+    await edit_section(query, caption=txt, image_key="tickets", reply_markup=kb)
+
+
+async def support_create_start(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["awaiting_ticket_text"] = True
+    context.user_data["ticket_category"] = "general"
+    await edit_section(
+        query,
+        caption=(
+            "📝 Опишите вашу проблему одним сообщением (минимум 10 символов).\n"
+            "Наши админы постараются ответить как можно быстрее."
+        ),
+        image_key="tickets",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="support")]]
+        ),
+    )
+
+
+async def support_my_tickets(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    cur.execute(
+        "SELECT id, status, created_at FROM support_tickets WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+        (uid,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        txt = "📂 У вас пока нет заявок."
+    else:
+        txt = "📂 Ваши заявки (последние 10):\n"
+        for r in rows:
+            t = time.strftime("%d.%m %H:%M", time.localtime(r["created_at"]))
+            txt += f"• #{r['id']} – {r['status']} ({t})\n"
+    await edit_section(
+        query,
+        caption=txt,
+        image_key="tickets",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="support")]]
+        ),
+    )
+
+
+async def admin_tickets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(query.from_user.id):
+        await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    cur.execute(
+        "SELECT id, user_id, status, created_at FROM support_tickets ORDER BY status = 'open' DESC, updated_at DESC LIMIT 15"
+    )
+    rows = cur.fetchall()
+    if not rows:
+        txt = "🎫 Заявок нет."
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+        )
+        await edit_section(query, caption=txt, image_key="tickets", reply_markup=kb)
+        return
+    txt = "🎫 Тикеты поддержки (15 последних):\n"
+    btn_rows: List[List[InlineKeyboardButton]] = []
+    for r in rows:
+        t = time.strftime("%d.%m %H:%M", time.localtime(r["created_at"]))
+        txt += f"• #{r['id']} от {r['user_id']} – {r['status']} ({t})\n"
+        btn_rows.append([
+            InlineKeyboardButton(
+                f"Открыть #{r['id']}", callback_data=f"admin_ticket_view_{r['id']}"
+            )
+        ])
+    btn_rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin")])
+    await edit_section(
+        query, caption=txt, image_key="tickets", reply_markup=InlineKeyboardMarkup(btn_rows)
+    )
+
+
+async def admin_ticket_view(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(query.from_user.id):
+        await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    ticket_id = int(query.data.split("_")[-1])
+    cur.execute("SELECT * FROM support_tickets WHERE id = ?", (ticket_id,))
+    t = cur.fetchone()
+    if not t:
+        await edit_section(query, caption="❌ Тикет не найден.", image_key="tickets")
+        return
+    cur.execute(
+        "SELECT * FROM support_replies WHERE ticket_id = ? ORDER BY id ASC",
+        (ticket_id,),
+    )
+    replies = cur.fetchall()
+    txt = (
+        f"📨 Тикет #{ticket_id} от {t['user_id']} – {t['status']}\n"
+        f"Текст: {t['text']}\n\n"
+    )
+    if replies:
+        txt += "Ответы администраторов:\n"
+        for r in replies:
+            ts = time.strftime("%d.%m %H:%M", time.localtime(r["created_at"]))
+            txt += f"[{ts}] admin {r['admin_id']}: {r['text']}\n"
+    btns = [
+        InlineKeyboardButton("✉️ Ответить", callback_data=f"admin_ticket_reply_{ticket_id}"),
+        InlineKeyboardButton("✅ Закрыть", callback_data=f"admin_ticket_close_{ticket_id}"),
+        InlineKeyboardButton("🗑️ Удалить", callback_data=f"admin_ticket_delete_{ticket_id}"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="admin_tickets"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    await edit_section(query, caption=txt, image_key="tickets", reply_markup=kb)
+
+
+async def admin_ticket_reply_start(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(query.from_user.id):
+        await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    ticket_id = int(query.data.split("_")[-1])
+    context.user_data["awaiting_ticket_reply"] = True
+    context.user_data["ticket_reply_info"] = {"ticket_id": ticket_id}
+    await edit_section(
+        query,
+        caption=f"✍️ Введите текст ответа для тикета #{ticket_id} одним сообщением.",
+        image_key="tickets",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin_ticket_view_{ticket_id}")]]
+        ),
+    )
+
+
+async def admin_ticket_close(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(query.from_user.id):
+        await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    ticket_id = int(query.data.split("_")[-1])
+    _execute(
+        "UPDATE support_tickets SET status = 'closed', updated_at = ? WHERE id = ?",
+        (int(time.time()), ticket_id),
+    )
+    await admin_ticket_view(query, context)
+
+
+async def admin_ticket_delete(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(query.from_user.id):
+        await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    ticket_id = int(query.data.split("_")[-1])
+    _execute("DELETE FROM support_replies WHERE ticket_id = ?", (ticket_id,))
+    _execute("DELETE FROM support_tickets WHERE id = ?", (ticket_id,))
+    await admin_tickets_menu(query, context)
+
+
+# ----------------------------------------------------------------------
 #   Главное меню
 # ----------------------------------------------------------------------
 def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
@@ -1266,6 +1455,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
+        InlineKeyboardButton("🆘 Поддержка", callback_data="support"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
     if is_admin(user_id):
@@ -1742,6 +1932,7 @@ async def get_coins_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     btns = [
         InlineKeyboardButton("🤝 Пригласить друга", callback_data="task_referral"),
         InlineKeyboardButton("🔹 Кликнуть (1‑5 монет)", callback_data="task_click"),
+        InlineKeyboardButton("🎁 Ежедневная награда", callback_data="task_daily"),
         InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     ]
     kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
@@ -1785,6 +1976,43 @@ async def task_click(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     await edit_section(
         query,
         caption=f"✨ Вы получили {format_num(reward)}🪙!",
+        image_key="coins",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+        ),
+    )
+
+
+async def task_daily(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ежедневная награда с нарастающим бонусом по стрику."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    now = int(time.time())
+    cooldown = 20 * 60  # 20 минут (примерно как запросили «интересные» фичи)
+    if now - (user["last_daily_time"] or 0) < cooldown:
+        left = cooldown - (now - (user["last_daily_time"] or 0))
+        m, s = divmod(left, 60)
+        await edit_section(
+            query,
+            caption=f"⏳ До следующей награды: {m}м {s}с",
+            image_key="coins",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+            ),
+        )
+        return
+    reward = random.randint(50, 150)
+    update_user(
+        uid,
+        coins=min(user["coins"] + reward, MAX_INT),
+        weekly_coins=user["weekly_coins"] + reward,
+        reputation=user["reputation"] + 1,
+        last_daily_time=now,
+    )
+    log_user_action(uid, f"Ежедневная награда {reward}🪙")
+    await edit_section(
+        query,
+        caption=f"🎁 Ежедневная награда: +{format_num(reward)}🪙",
         image_key="coins",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
@@ -2290,6 +2518,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
         InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
+        InlineKeyboardButton("🎫 Тикеты", callback_data="admin_tickets"),
         InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     ]
     kb = chunk_buttons(btns, per_row=2)
@@ -2457,6 +2686,9 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "admin_clans":
         await admin_clans_panel(query, context)
+        return
+    if data == "admin_tickets":
+        await admin_tickets_menu(query, context)
         return
     if data == "admin_clan_stats":
         cur.execute("SELECT COUNT(*) as count FROM clans")
@@ -3053,6 +3285,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "task_click":
         await task_click(query, context)
         return
+    if data == "task_daily":
+        await task_daily(query, context)
+        return
     # ------------------- Казино -------------------
     if data == "casino_info":
         await casino_info(query, context)
@@ -3177,6 +3412,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data.startswith("admin_"):
         await admin_actions(query, context)
+        return
+    # ------------------- Поддержка -------------------
+    if data == "support":
+        await support_menu(query, context)
+        return
+    if data == "support_create":
+        await support_create_start(query, context)
+        return
+    if data == "support_my":
+        await support_my_tickets(query, context)
+        return
+    if data.startswith("admin_ticket_view_"):
+        await admin_ticket_view(query, context)
+        return
+    if data.startswith("admin_ticket_reply_"):
+        await admin_ticket_reply_start(query, context)
+        return
+    if data.startswith("admin_ticket_close_"):
+        await admin_ticket_close(query, context)
+        return
+    if data.startswith("admin_ticket_delete_"):
+        await admin_ticket_delete(query, context)
         return
     # ------------------- Неизвестная команда -------------------
     await query.edit_message_caption(caption="❓ Неизвестная команда.")
@@ -3311,6 +3568,76 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ------------------- Промокод (пользователь) -------------------
     if context.user_data.get("awaiting_promo_input"):
         await handle_promo_input(update, context)
+        return
+
+    # ------------------- Создание тикета (пользователь) -------------------
+    if context.user_data.get("awaiting_ticket_text"):
+        txt_body = txt.strip()
+        if len(txt_body) < 10:
+            await update.message.reply_text("❌ Опишите проблему подробнее (минимум 10 символов).")
+            return
+        uid = update.effective_user.id
+        now = int(time.time())
+        category = context.user_data.get("ticket_category", "general")
+        _execute(
+            "INSERT INTO support_tickets (user_id, category, text, status, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (uid, category, txt_body, "open", now, now),
+        )
+        ticket_id = cur.lastrowid
+        context.user_data.pop("awaiting_ticket_text", None)
+        context.user_data.pop("ticket_category", None)
+        log_user_action(uid, f"Создал тикет #{ticket_id}")
+        try:
+            await update.message.reply_text(
+                f"✅ Заявка #{ticket_id} создана! Мы ответим как можно скорее."
+            )
+        except Exception:
+            pass
+        return
+
+    # ------------------- Ответ по тикету (админ) -------------------
+    if context.user_data.get("awaiting_ticket_reply"):
+        if not is_admin(update.effective_user.id):
+            context.user_data.pop("awaiting_ticket_reply", None)
+            return
+        reply_text = txt.strip()
+        info = context.user_data.get("ticket_reply_info", {})
+        ticket_id = int(info.get("ticket_id", 0))
+        uid = update.effective_user.id
+        now = int(time.time())
+        if ticket_id <= 0 or len(reply_text) == 0:
+            await update.message.reply_text("❌ Некорректные данные ответа.")
+            return
+        # Получаем автора тикета
+        cur.execute("SELECT user_id FROM support_tickets WHERE id = ?", (ticket_id,))
+        row = cur.fetchone()
+        if not row:
+            await update.message.reply_text("❌ Тикет не найден.")
+            context.user_data.pop("awaiting_ticket_reply", None)
+            context.user_data.pop("ticket_reply_info", None)
+            return
+        target_user_id = row["user_id"]
+        _execute(
+            "INSERT INTO support_replies (ticket_id, admin_id, text, created_at) VALUES (?,?,?,?)",
+            (ticket_id, uid, reply_text, now),
+        )
+        _execute(
+            "UPDATE support_tickets SET status = 'answered', updated_at = ? WHERE id = ?",
+            (now, ticket_id),
+        )
+        log_user_action(uid, f"Ответил в тикете #{ticket_id}")
+        # Уведомляем пользователя
+        try:
+            await context.bot.send_message(
+                target_user_id,
+                f"💬 Ответ по вашей заявке #{ticket_id}:
+{reply_text}"
+            )
+        except Exception:
+            pass
+        context.user_data.pop("awaiting_ticket_reply", None)
+        context.user_data.pop("ticket_reply_info", None)
+        await update.message.reply_text("✅ Ответ отправлен.")
         return
 
     # ------------------- Создание клана -------------------
