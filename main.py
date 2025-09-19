@@ -30,6 +30,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from support_features import setup_support_features, extend_main_menu_buttons
 
 # ----------------------------------------------------------------------
 #   Конфигурация
@@ -1268,6 +1269,13 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
+    # Extend with external module buttons
+    try:
+        extra = extend_main_menu_buttons(user_id)
+        if extra:
+            rows.extend(chunk_buttons(extra, per_row=2))
+    except Exception:
+        pass
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("🔥 Админ", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
@@ -3789,6 +3797,21 @@ def main() -> None:
         return
     add_admins()
     app = ApplicationBuilder().token(TOKEN).build()
+    # Setup external support and quests module before generic handlers
+    try:
+        setup_support_features(
+            app,
+            conn,
+            cur,
+            {
+                "get_user": get_user,
+                "update_user": update_user,
+                "log_user_action": log_user_action,
+                "format_num": format_num,
+            },
+        )
+    except Exception:
+        pass
     # Основные команды
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("pets", pets_command))
