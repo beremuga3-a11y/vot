@@ -30,6 +30,15 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from support_features import (
+    setup_support_features,
+    extend_main_menu_buttons as extend_support_buttons,
+    quest_progress_hook,
+)
+from fun_cases import (
+    setup_fun_cases,
+    extend_main_menu_buttons_extra as extend_fun_buttons,
+)
 
 # ----------------------------------------------------------------------
 #   Конфигурация
@@ -1267,7 +1276,9 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
-    rows.extend(chunk_buttons(other, per_row=3))
+    # Extend with extra modules
+    extra = extend_support_buttons(user_id) + extend_fun_buttons()
+    rows.extend(chunk_buttons(other + extra, per_row=3))
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("🔥 Админ", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
@@ -3789,6 +3800,37 @@ def main() -> None:
         return
     add_admins()
     app = ApplicationBuilder().token(TOKEN).build()
+    # Setup external feature modules (support & quests, fun cases)
+    setup_support_features(
+        app,
+        conn,
+        cur,
+        {
+            "get_user": get_user,
+            "update_user": update_user,
+            "log_user_action": lambda uid, a: _execute(
+                "INSERT INTO admin_logs (user_id, action, ts) VALUES (?,?,?)",
+                (uid, a, int(time.time())),
+            ),
+            "format_num": format_num,
+            # Optional: grant_pet if present in this project
+        },
+    )
+    setup_fun_cases(
+        app,
+        conn,
+        cur,
+        {
+            "get_user": get_user,
+            "update_user": update_user,
+            "log_user_action": lambda uid, a: _execute(
+                "INSERT INTO admin_logs (user_id, action, ts) VALUES (?,?,?)",
+                (uid, a, int(time.time())),
+            ),
+            "format_num": format_num,
+            # Optional: grant_pet can be added here if available
+        },
+    )
     # Основные команды
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("pets", pets_command))
@@ -3813,6 +3855,7 @@ def main() -> None:
         )
     )
     # Обработчики
+    # Our support/quests/fun handlers are registered inside setup_* before this catch-all
     app.add_handler(CallbackQueryHandler(button))
     # Навигация в списке питомцев
     app.add_handler(CallbackQueryHandler(pets_nav, pattern="^pets_"))
