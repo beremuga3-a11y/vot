@@ -1104,7 +1104,7 @@ async def check_clan_battles(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             
             try:
-                context.bot.send_message(
+                await context.bot.send_message(
                     member["user_id"],
                     f"🏆 Ваш клан выиграл битву #{battle['id']}!\n"
                     f"Награда: {format_num(prize_per_member)}🪙"
@@ -2069,7 +2069,7 @@ async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None
     cur.execute("SELECT user_id FROM users")
     for (uid,) in cur.fetchall():
         try:
-            context.bot.send_message(uid, txt)
+            await context.bot.send_message(uid, txt)
         except Exception:
             pass
     await edit_section(
@@ -2525,10 +2525,11 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user_clan:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
-        member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
-            for m in members[:10]  # Показываем только первых 10
-        ])
+        member_lines = []
+        for m in members[:10]:
+            display_name = m["username"] or f"ID{m['user_id']}"
+            member_lines.append(f"👤 {display_name} ({m['role']}) - {m['contribution']} вклада")
+        member_text = "\n".join(member_lines)
         
         text = (
             f"⚔️ Ваш клан: {user_clan['name']}\n"
@@ -2852,8 +2853,8 @@ async def clan_battle_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None
     prize = min(user_clan["experience"], opponent["experience"]) * 1000  # Приз основан на опыте
     
     _execute(
-        "INSERT INTO clan_battles (clan1_id, clan2_id, started_at, prize) VALUES (?,?,?,?)",
-        (user_clan["id"], opponent_id, now, prize)
+        "INSERT INTO clan_battles (clan1_id, clan2_id, started_at, ended_at, prize) VALUES (?,?,?,?,?)",
+        (user_clan["id"], opponent_id, now, 0, prize)
     )
     
     battle_id = cur.lastrowid
@@ -2863,7 +2864,7 @@ async def clan_battle_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None
         members = get_clan_members(clan_id)
         for member in members:
             try:
-                context.bot.send_message(
+                await context.bot.send_message(
                     member["user_id"],
                     f"⚔️ Началась клановая битва!\n"
                     f"Ваш клан против {opponent['name']}\n"
@@ -3602,7 +3603,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Трейд (упрощённый пример) -------------------
     if txt.lower().startswith("/trade"):
-        await start_trade(query, context)   # функция start_trade реализована ниже
+        await start_trade(update, context)   # функция start_trade реализована ниже
         return
 
     # ------------------- Любой другой текст -------------------
@@ -3613,17 +3614,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ----------------------------------------------------------------------
 #   Трейд (упрощённый пример)
 # ----------------------------------------------------------------------
-async def start_trade(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запускает простую схему трейда – запрос получателя."""
     context.user_data["trade_state"] = {"step": 1}
-    await edit_section(
-        query,
-        caption="🤝 Трейд: введите ID получателя (user_id).",
-        image_key="farm",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        ),
-    )
+    await update.message.reply_text("🤝 Трейд: введите ID получателя (user_id).")
 
 
 async def handle_trade_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
