@@ -278,6 +278,15 @@ def init_db() -> None:
         );
         """
     )
+    # ---------- user_activity ----------
+    _execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_activity (
+            user_id INTEGER PRIMARY KEY,
+            last_activity INTEGER DEFAULT 0
+        );
+        """
+    )
     # ---------- clans ----------
     _execute(
         """
@@ -497,6 +506,42 @@ def log_user_action(user_id: int, action: str) -> None:
         )
     except Exception as e:
         log.error(f"Ошибка записи в журнал: {e}")
+
+
+def update_user_activity(user_id: int) -> None:
+    """Обновляет время последней активности пользователя."""
+    try:
+        _execute(
+            "INSERT INTO user_activity (user_id, last_activity) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET last_activity=excluded.last_activity",
+            (user_id, int(time.time())),
+        )
+    except Exception as e:
+        log.error(f"Ошибка обновления активности: {e}")
+
+
+def get_bot_statistics() -> dict:
+    """Возвращает статистику бота: общие игроки, за 24 часа, за 1 час."""
+    now = int(time.time())
+    hour_ago = now - 3600  # 1 час назад
+    day_ago = now - 86400  # 24 часа назад
+    
+    # Общее количество игроков
+    cur.execute("SELECT COUNT(*) as count FROM users")
+    total_users = cur.fetchone()["count"]
+    
+    # Игроки за последние 24 часа
+    cur.execute("SELECT COUNT(*) as count FROM user_activity WHERE last_activity >= ?", (day_ago,))
+    users_24h = cur.fetchone()["count"]
+    
+    # Игроки за последний час
+    cur.execute("SELECT COUNT(*) as count FROM user_activity WHERE last_activity >= ?", (hour_ago,))
+    users_1h = cur.fetchone()["count"]
+    
+    return {
+        "total_users": total_users,
+        "users_24h": users_24h,
+        "users_1h": users_1h
+    }
 
 
 # ----------------------------------------------------------------------
@@ -2279,6 +2324,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
         return
     btns = [
+        InlineKeyboardButton("📈 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
@@ -2307,6 +2353,23 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     if not is_admin(uid):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    if data == "admin_bot_stats":
+        stats = get_bot_statistics()
+        text = (
+            f"📈 Статистика бота\n\n"
+            f"👥 Общее количество игроков: {format_num(stats['total_users'])}\n"
+            f"📅 Игроков за 24 часа: {format_num(stats['users_24h'])}\n"
+            f"⏰ Игроков за 1 час: {format_num(stats['users_1h'])}"
+        )
+        await edit_section(
+            query,
+            caption=text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            ),
+        )
         return
     if data == "admin_reset_top":
         _execute(
@@ -2998,6 +3061,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer()
     except Exception:
         pass
+    # Обновляем активность пользователя
+    update_user_activity(query.from_user.id)
     data = query.data
     # ------------------- Универсальная «Назад» -------------------
     if data == "back":
@@ -3190,6 +3255,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     txt = update.message.text if update.message else ""
     user = update.effective_user
     db_user = get_user(user.id)
+    # Обновляем активность пользователя
+    update_user_activity(user.id)
     # Проверяем, не наступил ли новый сезон
     check_and_reset_season()
     # Реферальный параметр: /start <ref_id>
@@ -3224,6 +3291,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает все текстовые сообщения, не являющиеся командами."""
     user = update.effective_user
     txt = update.message.text if update.message else ""
+    # Обновляем активность пользователя
+    update_user_activity(user.id)
 
     # ------------------- Рассылка (админ) -------------------
     if context.user_data.get("awaiting_broadcast"):
@@ -3666,6 +3735,8 @@ async def handle_trade_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 #   /pets – список всех питомцев (пагинация)
 # ----------------------------------------------------------------------
 async def pets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Обновляем активность пользователя
+    update_user_activity(update.effective_user.id)
     await render_pets_command(update.message, context, page=0)
 
 
@@ -3730,6 +3801,8 @@ async def render_pets_callback(query, context: ContextTypes.DEFAULT_TYPE, page: 
 # ----------------------------------------------------------------------
 async def top_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Топ‑5 фермеров по weekly_coins (доступно в группах)."""
+    # Обновляем активность пользователя
+    update_user_activity(update.effective_user.id)
     cur.execute(
         "SELECT username, weekly_coins, user_id FROM users ORDER BY weekly_coins DESC LIMIT 5"
     )
@@ -3747,6 +3820,8 @@ async def top_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def stat_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статистика того, кто ввёл команду в группе."""
     user = update.effective_user
+    # Обновляем активность пользователя
+    update_user_activity(user.id)
     db_user = get_user(user.id)
     income_min = calculate_income_per_min(db_user)
     left, season_number = get_season_info()
