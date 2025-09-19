@@ -1060,7 +1060,7 @@ async def check_hunger(context: ContextTypes.DEFAULT_TYPE) -> None:
             if time.time() - last_fed > HUNGER_TIME:
                 update_user(uid, **{field: 0})
                 delete_pet_last_fed(uid, field)
-                log_user_action(uid, f"Потеряно всех {field} из‑за голода")
+                log_user_action(uid, f"Потеряно {cnt} {field} из‑за голода")
 
 
 async def check_clan_battles(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2290,6 +2290,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
         InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
+        InlineKeyboardButton("🐾 Восстановить питомцев", callback_data="admin_recover_pets"),
         InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     ]
     kb = chunk_buttons(btns, per_row=2)
@@ -2508,6 +2509,64 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_key="admin",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_clans")]]
+            ),
+        )
+        return
+    if data == "admin_recover_pets":
+        # Восстанавливаем питомцев, которые исчезли из-за голода за последние 48 часов
+        recovery_time = int(time.time()) - (48 * 3600)  # 48 часов назад
+        
+        # Получаем всех пользователей
+        cur.execute("SELECT user_id FROM users")
+        users = cur.fetchall()
+        
+        recovered_count = 0
+        total_pets_recovered = 0
+        
+        for (user_id,) in users:
+            user = get_user(user_id)
+            user_recovered = False
+            
+            # Проверяем каждое животное
+            for field, _, _, _, _, _, _ in ANIMAL_CONFIG:
+                if user[field] == 0:  # Если животное отсутствует
+                    # Проверяем, было ли оно потеряно из-за голода в последние 48 часов
+                    cur.execute(
+                        "SELECT action, ts FROM admin_logs WHERE user_id = ? AND action LIKE ? AND ts > ? ORDER BY ts DESC LIMIT 1",
+                        (user_id, f"%{field}%голода%", recovery_time)
+                    )
+                    log_entry = cur.fetchone()
+                    
+                    if log_entry:
+                        # Восстанавливаем животное
+                        # Получаем количество из лога (если возможно)
+                        action_text = log_entry["action"]
+                        # Пытаемся извлечь количество из текста лога
+                        match = re.search(r'Потеряно (\d+) ' + field, action_text)
+                        if match:
+                            pet_count = int(match.group(1))
+                        else:
+                            # Если не можем определить количество, восстанавливаем 1
+                            pet_count = 1
+                        
+                        update_user(user_id, **{field: pet_count})
+                        set_pet_last_fed(user_id, field, int(time.time()))
+                        log_user_action(user_id, f"Восстановлено {pet_count} {field} админом")
+                        user_recovered = True
+                        total_pets_recovered += pet_count
+            
+            if user_recovered:
+                recovered_count += 1
+        
+        await edit_section(
+            query,
+            caption=f"✅ Восстановление питомцев завершено!\n\n"
+                   f"👥 Пользователей восстановлено: {recovered_count}\n"
+                   f"🐾 Всего питомцев восстановлено: {total_pets_recovered}\n"
+                   f"⏰ Период восстановления: последние 48 часов",
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
             ),
         )
         return
