@@ -278,47 +278,7 @@ def init_db() -> None:
         );
         """
     )
-    # ---------- clans ----------
-    _execute(
-        """
-        CREATE TABLE IF NOT EXISTS clans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            leader_id INTEGER NOT NULL,
-            created_at INTEGER DEFAULT 0,
-            level INTEGER DEFAULT 1,
-            experience INTEGER DEFAULT 0,
-            max_members INTEGER DEFAULT 10
-        );
-        """
-    )
-    # ---------- clan_members ----------
-    _execute(
-        """
-        CREATE TABLE IF NOT EXISTS clan_members (
-            user_id INTEGER,
-            clan_id INTEGER,
-            role TEXT DEFAULT 'member',
-            joined_at INTEGER DEFAULT 0,
-            contribution INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, clan_id)
-        );
-        """
-    )
-    # ---------- clan_battles ----------
-    _execute(
-        """
-        CREATE TABLE IF NOT EXISTS clan_battles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            clan1_id INTEGER,
-            clan2_id INTEGER,
-            winner_id INTEGER,
-            started_at INTEGER,
-            ended_at INTEGER,
-            prize INTEGER DEFAULT 0
-        );
-        """
-    )
+    # Кланы удалены – таблицы не создаём
     conn.commit()
 
 
@@ -346,6 +306,7 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "autumn_gift_last",
     }
     for col in needed:
         if col not in existing:
@@ -386,89 +347,8 @@ def ensure_promo_columns() -> None:
 
 
 # ----------------------------------------------------------------------
-#   Функции для работы с кланами
+#   Кланы удалены (все связанные функции и таблицы удалены по требованию)
 # ----------------------------------------------------------------------
-def create_clan(name: str, leader_id: int) -> int:
-    """Создаёт клан и возвращает его ID."""
-    _execute(
-        "INSERT INTO clans (name, leader_id, created_at) VALUES (?,?,?)",
-        (name, leader_id, int(time.time()))
-    )
-    clan_id = cur.lastrowid
-    _execute(
-        "INSERT INTO clan_members (user_id, clan_id, role, joined_at) VALUES (?,?,?,?)",
-        (leader_id, clan_id, "leader", int(time.time()))
-    )
-    log_user_action(leader_id, f"Создал клан '{name}'")
-    return clan_id
-
-
-def get_user_clan(user_id: int) -> sqlite3.Row | None:
-    """Возвращает клан пользователя."""
-    cur.execute(
-        "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
-        (user_id,)
-    )
-    return cur.fetchone()
-
-
-def join_clan(user_id: int, clan_id: int) -> bool:
-    """Присоединяет пользователя к клану."""
-    # Проверяем, есть ли место в клане
-    cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan_id,))
-    member_count = cur.fetchone()["count"]
-    cur.execute("SELECT max_members FROM clans WHERE id = ?", (clan_id,))
-    max_members = cur.fetchone()["max_members"]
-    
-    if member_count >= max_members:
-        return False
-    
-    _execute(
-        "INSERT INTO clan_members (user_id, clan_id, joined_at) VALUES (?,?,?)",
-        (user_id, clan_id, int(time.time()))
-    )
-    log_user_action(user_id, f"Присоединился к клану {clan_id}")
-    return True
-
-
-def leave_clan(user_id: int) -> bool:
-    """Покидает клан."""
-    cur.execute("SELECT clan_id, role FROM clan_members WHERE user_id = ?", (user_id,))
-    result = cur.fetchone()
-    if not result:
-        return False
-    
-    clan_id, role = result["clan_id"], result["role"]
-    
-    # Если лидер покидает клан, передаём лидерство другому участнику
-    if role == "leader":
-        cur.execute("SELECT user_id FROM clan_members WHERE clan_id = ? AND user_id != ? LIMIT 1", (clan_id, user_id))
-        new_leader = cur.fetchone()
-        if new_leader:
-            _execute("UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?", (new_leader["user_id"], clan_id))
-            _execute("UPDATE clans SET leader_id = ? WHERE id = ?", (new_leader["user_id"], clan_id))
-        else:
-            # Если в клане больше никого нет, удаляем клан
-            _execute("DELETE FROM clans WHERE id = ?", (clan_id,))
-    
-    _execute("DELETE FROM clan_members WHERE user_id = ?", (user_id,))
-    log_user_action(user_id, f"Покинул клан {clan_id}")
-    return True
-
-
-def get_clan_members(clan_id: int) -> List[sqlite3.Row]:
-    """Возвращает список участников клана."""
-    cur.execute(
-        "SELECT cm.*, u.username FROM clan_members cm JOIN users u ON cm.user_id = u.user_id WHERE cm.clan_id = ? ORDER BY cm.contribution DESC",
-        (clan_id,)
-    )
-    return cur.fetchall()
-
-
-def get_clan_top() -> List[sqlite3.Row]:
-    """Возвращает топ кланов по опыту."""
-    cur.execute("SELECT * FROM clans ORDER BY experience DESC LIMIT 10")
-    return cur.fetchall()
 
 
 # ----------------------------------------------------------------------
@@ -1013,6 +893,13 @@ def calculate_income_per_min(user: sqlite3.Row) -> int:
     base = 0
     for field, inc, *_ in ANIMAL_CONFIG:
         base += user[field] * inc
+    # Глобальный осенний бонус: +10% к доходу, если событие активно
+    try:
+        cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+        if cur.fetchone()["autumn_event_active"]:
+            mult *= 1.10
+    except Exception:
+        pass
     # Доход от фермеров
     cur.execute("SELECT farmer_type, qty FROM farmers WHERE user_id = ?", (user["user_id"],))
     for row in cur.fetchall():
@@ -1065,60 +952,8 @@ async def check_hunger(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def check_clan_battles(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Проверяет и завершает клановые битвы."""
-    now = int(time.time())
-    battle_duration = 3600  # 1 час
-    
-    # Получаем битвы, которые должны завершиться
-    cur.execute(
-        "SELECT * FROM clan_battles WHERE ended_at = 0 AND ? - started_at >= ?",
-        (now, battle_duration)
-    )
-    expired_battles = cur.fetchall()
-    
-    for battle in expired_battles:
-        # Определяем победителя случайно (можно изменить логику)
-        winner_id = battle["clan1_id"] if random.random() < 0.5 else battle["clan2_id"]
-        
-        # Обновляем битву
-        _execute(
-            "UPDATE clan_battles SET winner_id = ?, ended_at = ? WHERE id = ?",
-            (winner_id, now, battle["id"])
-        )
-        
-        # Награждаем победителей
-        members = get_clan_members(winner_id)
-        prize_per_member = battle["prize"] // max(len(members), 1)
-        
-        for member in members:
-            user = get_user(member["user_id"])
-            new_coins = min(user["coins"] + prize_per_member, MAX_INT)
-            update_user(
-                member["user_id"],
-                coins=new_coins,
-                weekly_coins=user["weekly_coins"] + prize_per_member
-            )
-            # Увеличиваем вклад в клан
-            _execute(
-                "UPDATE clan_members SET contribution = contribution + ? WHERE user_id = ? AND clan_id = ?",
-                (prize_per_member // 1000, member["user_id"], winner_id)
-            )
-            
-            try:
-                context.bot.send_message(
-                    member["user_id"],
-                    f"🏆 Ваш клан выиграл битву #{battle['id']}!\n"
-                    f"Награда: {format_num(prize_per_member)}🪙"
-                )
-            except Exception:
-                pass
-        
-        # Увеличиваем опыт клана-победителя
-        _execute(
-            "UPDATE clans SET experience = experience + ? WHERE id = ?",
-            (battle["prize"] // 10000, winner_id)
-        )
-        
-        log.info(f"Битва #{battle['id']} завершена. Победитель: клан {winner_id}")
+    # Кланы удалены – функция не используется
+    return
 
 
 # ----------------------------------------------------------------------
@@ -1265,7 +1100,6 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
-        InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
     if is_admin(user_id):
@@ -1742,6 +1576,7 @@ async def get_coins_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     btns = [
         InlineKeyboardButton("🤝 Пригласить друга", callback_data="task_referral"),
         InlineKeyboardButton("🔹 Кликнуть (1‑5 монет)", callback_data="task_click"),
+        InlineKeyboardButton("🍂 Ежедневный осенний подарок", callback_data="task_autumn_gift"),
         InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     ]
     kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
@@ -1785,6 +1620,48 @@ async def task_click(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     await edit_section(
         query,
         caption=f"✨ Вы получили {format_num(reward)}🪙!",
+        image_key="coins",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+        ),
+    )
+
+
+async def task_autumn_gift(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ежедневный осенний подарок: 1 осенний корм раз в 24ч при активном событии."""
+    uid = query.from_user.id
+    cur.execute("SELECT autumn_event_active FROM global_settings WHERE id = 1")
+    active = cur.fetchone()["autumn_event_active"]
+    if not active:
+        await edit_section(
+            query,
+            caption="❌ Осеннее событие сейчас не активно.",
+            image_key="coins",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+            ),
+        )
+        return
+    user = get_user(uid)
+    now = int(time.time())
+    if now - (user["autumn_gift_last"] or 0) < 86400:
+        left = 86400 - (now - (user["autumn_gift_last"] or 0))
+        h, r = divmod(left, 3600)
+        m = r // 60
+        await edit_section(
+            query,
+            caption=f"⏳ Подарок уже получен. До следующего: {h}ч {m}м.",
+            image_key="coins",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+            ),
+        )
+        return
+    update_user(uid, autumn_feed=user["autumn_feed"] + 1, autumn_gift_last=now)
+    log_user_action(uid, "+1 осенний корм (ежедневный подарок)")
+    await edit_section(
+        query,
+        caption="✅ Получен ежедневный осенний подарок: +1 осенний корм!",
         image_key="coins",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
@@ -2037,11 +1914,10 @@ async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     status = "✅ Включено" if active else "❌ Выключено"
     text = (
         f"{status}\n\n"
-        "🍂 Осеннее событие – временный бонус:\n"
-        f"• При покупке осеннего корма (в магазине) вы получаете двойной доход\n"
-        f"  на 1 ч.\n"
-        f"• Стоимость осеннего корма – {format_num(AUTUMN_FOOD_PRICE)}🪙.\n"
-        "• Бонус активен только пока событие включено администратором."
+        "🍂 Осеннее событие – временные бонусы:\n"
+        "• Осенний глобальный бонус: +10% к доходу пока событие активно.\n"
+        f"• При покупке осеннего корма – ×2 доход на 1 ч. Цена: {format_num(AUTUMN_FOOD_PRICE)}🪙.\n"
+        "• Ежедневный осенний подарок: 1 осенний корм в сутки."
     )
     await edit_section(
         query,
@@ -2289,7 +2165,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
-        InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
+        InlineKeyboardButton("📈 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("⬅️ Назад", callback_data="back"),
     ]
     kb = chunk_buttons(btns, per_row=2)
@@ -2455,59 +2331,25 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         _execute("UPDATE users SET autumn_feed = 0, autumn_bonus_end = 0")
         await edit_section(query, caption="✅ Осенние монеты всех игроков обнулены.", image_key="admin")
         return
-    if data == "admin_clans":
-        await admin_clans_panel(query, context)
-        return
-    if data == "admin_clan_stats":
-        cur.execute("SELECT COUNT(*) as count FROM clans")
-        clan_count = cur.fetchone()["count"]
-        cur.execute("SELECT COUNT(*) as count FROM clan_members")
-        member_count = cur.fetchone()["count"]
-        cur.execute("SELECT AVG(experience) as avg_exp FROM clans")
-        avg_exp = cur.fetchone()["avg_exp"] or 0
-        
+    if data == "admin_bot_stats":
+        # Общая статистика бота
+        cur.execute("SELECT COUNT(*) as c FROM users")
+        total_users = cur.fetchone()["c"]
+        day_ago = int(time.time()) - 86400
+        cur.execute("SELECT COUNT(DISTINCT user_id) as c FROM admin_logs WHERE ts >= ?", (day_ago,))
+        active_24h = cur.fetchone()["c"]
         text = (
-            f"📊 Статистика кланов:\n\n"
-            f"• Всего кланов: {clan_count}\n"
-            f"• Всего участников: {member_count}\n"
-            f"• Средний опыт: {int(avg_exp)}\n\n"
-            f"Топ-5 кланов по опыту:"
+            "📈 Статистика бота\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Всего игроков: {format_num(total_users)}\n"
+            f"🟢 Активных за 24ч: {format_num(active_24h)}\n"
         )
-        
-        clans = get_clan_top()[:5]
-        for i, clan in enumerate(clans, 1):
-            cur.execute("SELECT COUNT(*) as count FROM clan_members WHERE clan_id = ?", (clan["id"],))
-            member_count = cur.fetchone()["count"]
-            text += f"\n{i}. {clan['name']} - {clan['experience']} опыта ({member_count} участников)"
-        
         await edit_section(
             query,
             caption=text,
             image_key="admin",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_clans")]]
-            ),
-        )
-        return
-    if data == "admin_clan_delete":
-        context.user_data["awaiting_clan_delete"] = True
-        await edit_section(
-            query,
-            caption="🗑️ Введите ID клана для удаления:",
-            image_key="admin",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_clans")]]
-            ),
-        )
-        return
-    if data == "admin_clan_members":
-        context.user_data["awaiting_clan_members"] = True
-        await edit_section(
-            query,
-            caption="👥 Введите ID клана для просмотра участников:",
-            image_key="admin",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_clans")]]
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
             ),
         )
         return
@@ -3053,6 +2895,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "task_click":
         await task_click(query, context)
         return
+    if data == "task_autumn_gift":
+        await task_autumn_gift(query, context)
+        return
     # ------------------- Казино -------------------
     if data == "casino_info":
         await casino_info(query, context)
@@ -3101,76 +2946,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await promo_menu(query, context)
         return
     # ------------------- Кланы -------------------
-    if data == "clans":
-        await clans_menu(query, context)
-        return
-    if data == "clan_create":
-        await clan_create(query, context)
-        return
-    if data == "clan_search":
-        await clan_search(query, context)
-        return
-    if data == "clan_top":
-        await clan_top(query, context)
-        return
-    if data == "clan_leave":
-        uid = query.from_user.id
-        if leave_clan(uid):
-            await edit_section(
-                query,
-                caption="✅ Вы покинули клан.",
-                image_key="admin",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Назад", callback_data="clans")]]
-                ),
-            )
-        else:
-            await edit_section(
-                query,
-                caption="❌ Вы не состоите в клане.",
-                image_key="admin",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Назад", callback_data="clans")]]
-                ),
-            )
-        return
-    if data.startswith("clan_join_"):
-        clan_id = int(data.split("_")[2])
-        uid = query.from_user.id
-        if join_clan(uid, clan_id):
-            await edit_section(
-                query,
-                caption="✅ Вы присоединились к клану!",
-                image_key="admin",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Назад", callback_data="clans")]]
-                ),
-            )
-        else:
-            await edit_section(
-                query,
-                caption="❌ Не удалось присоединиться к клану (нет места или вы уже в клане).",
-                image_key="admin",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Назад", callback_data="clans")]]
-                ),
-            )
-        return
-    if data == "clan_battles":
-        await clan_battles_menu(query, context)
-        return
-    if data == "clan_start_battle":
-        await clan_start_battle(query, context)
-        return
-    if data.startswith("clan_battle_"):
-        await clan_battle_confirm(query, context)
-        return
-    if data == "clan_battle_status":
-        await clan_battle_status(query, context)
-        return
-    if data == "clan_battle_history":
-        await clan_battle_history(query, context)
-        return
+    # Кланы удалены
     # ------------------- Админ‑панель -------------------
     if data == "admin":
         await admin_panel(query, context)
@@ -3313,84 +3089,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await handle_promo_input(update, context)
         return
 
-    # ------------------- Создание клана -------------------
-    if context.user_data.get("awaiting_clan_name"):
-        clan_name = txt.strip()
-        if len(clan_name) > 20:
-            await update.message.reply_text("❌ Название клана слишком длинное (максимум 20 символов).")
-            return
-        if len(clan_name) < 3:
-            await update.message.reply_text("❌ Название клана слишком короткое (минимум 3 символа).")
-            return
-        
-        uid = update.effective_user.id
-        if get_user_clan(uid):
-            await update.message.reply_text("❌ Вы уже состоите в клане!")
-            context.user_data["awaiting_clan_name"] = False
-            return
-        
-        try:
-            clan_id = create_clan(clan_name, uid)
-            await update.message.reply_text(f"✅ Клан '{clan_name}' создан! ID клана: {clan_id}")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка создания клана: {str(e)}")
-        
-        context.user_data["awaiting_clan_name"] = False
-        return
-
-    # ------------------- Админ функции кланов -------------------
-    if context.user_data.get("awaiting_clan_delete"):
-        if not txt.isdigit():
-            await update.message.reply_text("❌ Введите числовой ID клана.")
-            return
-        
-        clan_id = int(txt)
-        cur.execute("SELECT name FROM clans WHERE id = ?", (clan_id,))
-        clan = cur.fetchone()
-        
-        if not clan:
-            await update.message.reply_text("❌ Клан с таким ID не найден.")
-            context.user_data["awaiting_clan_delete"] = False
-            return
-        
-        # Удаляем клан и всех его участников
-        _execute("DELETE FROM clan_members WHERE clan_id = ?", (clan_id,))
-        _execute("DELETE FROM clans WHERE id = ?", (clan_id,))
-        
-        await update.message.reply_text(f"✅ Клан '{clan['name']}' (ID: {clan_id}) удалён.")
-        context.user_data["awaiting_clan_delete"] = False
-        return
-
-    if context.user_data.get("awaiting_clan_members"):
-        if not txt.isdigit():
-            await update.message.reply_text("❌ Введите числовой ID клана.")
-            return
-        
-        clan_id = int(txt)
-        cur.execute("SELECT name FROM clans WHERE id = ?", (clan_id,))
-        clan = cur.fetchone()
-        
-        if not clan:
-            await update.message.reply_text("❌ Клан с таким ID не найден.")
-            context.user_data["awaiting_clan_members"] = False
-            return
-        
-        members = get_clan_members(clan_id)
-        if not members:
-            await update.message.reply_text(f"❌ В клане '{clan['name']}' нет участников.")
-            context.user_data["awaiting_clan_members"] = False
-            return
-        
-        text = f"👥 Участники клана '{clan['name']}':\n\n"
-        for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
-            text += f"   Роль: {member['role']}\n"
-            text += f"   Вклад: {member['contribution']}\n"
-            text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
-        
-        await update.message.reply_text(text)
-        context.user_data["awaiting_clan_members"] = False
-        return
+    # Кланы удалены – связанные состояния не обрабатываются
 
     # ------------------- Поиск по журналу -------------------
     if context.user_data.get("awaiting_logs_search"):
@@ -3821,7 +3520,7 @@ def main() -> None:
     # Фоновые задачи
     app.job_queue.run_repeating(auto_collect, interval=60, first=10)          # доход каждые 1 мин
     app.job_queue.run_repeating(check_hunger, interval=300, first=30)        # проверка голода
-    app.job_queue.run_repeating(check_clan_battles, interval=300, first=60)  # проверка клановых битв
+    # Кланы удалены – проверка клановых битв отключена
     app.job_queue.run_repeating(
         lambda _: check_and_reset_season(),
         interval=86400,
