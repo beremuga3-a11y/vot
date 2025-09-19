@@ -48,6 +48,13 @@ CHANNEL_ID = -1001234567890
 CHAT_ID = -4966660960
 CHAT_LINK = "https://t.me/+tjqmdwVMjtYxMTU6"
 CHANNEL_LINK = "https://t.me/spiderfarminfo"
+LEAF_COOLDOWN = 10 * 60          # сбор листьев: раз в 10 минут
+LEAF_REWARD_MIN = 5
+LEAF_REWARD_MAX = 20
+AUTUMN_CHEST_COST = 50           # листьев за сундук
+LEAF_TO_COIN = 100               # 1 лист = 100 монет при обмене
+LEAVES_FOR_FEED = 30             # обычный корм за 30 листьев
+LEAVES_FOR_AUTUMN_FEED = 60      # осенний корм за 60 листьев
 
 # Картинки
 MAIN_MENU_IMG = "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg"
@@ -69,6 +76,7 @@ SECTION_IMAGES: Dict[str, str] = {
     "admin": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "logs": "https://i.postimg.cc/fb1TQF6W/5355070803995131046.jpg",
     "top": "https://i.postimg.cc/mg2rY7Y4/5355070803995131023.jpg",
+    "autumn_festival": AUTUMN_EVENT_IMG,
 }
 # ----------------------------------------------------------------------
 #   Картинки питомцев ← NEW
@@ -346,6 +354,8 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "autumn_leaves",
+        "autumn_last_collect",
     }
     for col in needed:
         if col not in existing:
@@ -1265,6 +1275,7 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
+        InlineKeyboardButton("🍁 Осенний фестиваль", callback_data="autumn_festival"),
         InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
@@ -2052,6 +2063,183 @@ async def autumn_event_info(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         ),
     )
 
+
+async def autumn_festival_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Главное меню Осеннего фестиваля: сбор листьев, сундук, рынок."""
+    uid = query.from_user.id
+    user = get_user(uid)
+    now = int(time.time())
+    left = max(0, (user["autumn_last_collect"] + LEAF_COOLDOWN) - now)
+    m, s = divmod(left, 60)
+    text = (
+        f"🍁 Осенний фестиваль\n"
+        f"Листьев: {format_num(user['autumn_leaves'])}\n"
+        f"Сбор листьев: {'доступен' if left==0 else f'через {m}м {s}с'}\n"
+        f"🎁 Сундук: {AUTUMN_CHEST_COST}🍁\n"
+        f"💱 Обмен: 1🍁 = {format_num(LEAF_TO_COIN)}🪙"
+    )
+    btns = [
+        InlineKeyboardButton("🍂 Собрать листья", callback_data="autumn_collect"),
+        InlineKeyboardButton("🎁 Осенний сундук", callback_data="autumn_chest"),
+        InlineKeyboardButton("🏪 Осенний рынок", callback_data="autumn_market"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="back"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=2))
+    await edit_section(
+        query,
+        caption=text,
+        image_key="autumn_festival",
+        reply_markup=kb,
+    )
+
+
+async def autumn_collect(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    now = int(time.time())
+    if now - user["autumn_last_collect"] < LEAF_COOLDOWN:
+        left = user["autumn_last_collect"] + LEAF_COOLDOWN - now
+        m, s = divmod(left, 60)
+        await edit_section(
+            query,
+            caption=f"⏳ Собирать листья можно через {m}м {s}с.",
+            image_key="autumn_festival",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_festival")]]
+            ),
+        )
+        return
+    gained = random.randint(LEAF_REWARD_MIN, LEAF_REWARD_MAX)
+    update_user(
+        uid,
+        autumn_leaves=user["autumn_leaves"] + gained,
+        autumn_last_collect=now,
+        reputation=user["reputation"] + 1,
+    )
+    log_user_action(uid, f"Собрал {gained}🍁")
+    await edit_section(
+        query,
+        caption=f"✅ Вы собрали {gained}🍁!",
+        image_key="autumn_festival",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_festival")]]
+        ),
+    )
+
+
+async def autumn_chest(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    if user["autumn_leaves"] < AUTUMN_CHEST_COST:
+        await edit_section(
+            query,
+            caption=f"❌ Нужно {AUTUMN_CHEST_COST}🍁 для открытия сундука.",
+            image_key="autumn_festival",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_festival")]]
+            ),
+        )
+        return
+    # Рандомные награды: монеты, корм, питомец low tier
+    roll = random.random()
+    reward_text = ""
+    if roll < 0.55:
+        coins = random.randint(2_000, 20_000)
+        new_coins = min(user["coins"] + coins, MAX_INT)
+        update_user(uid, coins=new_coins, weekly_coins=user["weekly_coins"] + coins)
+        reward_text = f"💰 Монеты: +{format_num(coins)}🪙"
+    elif roll < 0.80:
+        # корм
+        if random.random() < 0.5:
+            update_user(uid, feed=user["feed"] + 1)
+            reward_text = "🍎 Обычный корм: +1"
+        else:
+            update_user(uid, autumn_feed=user["autumn_feed"] + 1)
+            reward_text = "🍂 Осенний корм: +1"
+    else:
+        # случайный common питомец 1 шт
+        common = [c for c in ANIMAL_CONFIG if c[4] == "common"]
+        if common:
+            field, *_ = random.choice(common)
+            update_user(uid, **{field: user[field] + 1})
+            set_pet_last_fed(uid, field, int(time.time()))
+            reward_text = f"🐾 Питомец: +1 {field}"
+        else:
+            coins = 10_000
+            new_coins = min(user["coins"] + coins, MAX_INT)
+            update_user(uid, coins=new_coins, weekly_coins=user["weekly_coins"] + coins)
+            reward_text = f"💰 Монеты: +{format_num(coins)}🪙"
+    # списываем листья
+    update_user(uid, autumn_leaves=user["autumn_leaves"] - AUTUMN_CHEST_COST)
+    log_user_action(uid, f"Открыл осенний сундук: {reward_text}")
+    await edit_section(
+        query,
+        caption=f"🎁 Награда из сундука:\n{reward_text}",
+        image_key="autumn_festival",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_festival")]]
+        ),
+    )
+
+
+async def autumn_market(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    text = (
+        f"🏪 Осенний рынок\n"
+        f"Листьев: {format_num(user['autumn_leaves'])}\n\n"
+        f"1) 🍎 Обычный корм — {LEAVES_FOR_FEED}🍁\n"
+        f"2) 🍂 Осенний корм — {LEAVES_FOR_AUTUMN_FEED}🍁\n"
+        f"3) 💱 Обмен листьев на монеты"
+    )
+    btns = [
+        InlineKeyboardButton("🍎 Купить обычный корм", callback_data="autumn_buy_feed"),
+        InlineKeyboardButton("🍂 Купить осенний корм", callback_data="autumn_buy_autumn_feed"),
+        InlineKeyboardButton("💱 Обмен 10🍁 → монеты", callback_data="autumn_exchange_10"),
+        InlineKeyboardButton("💱 Обмен 50🍁 → монеты", callback_data="autumn_exchange_50"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="autumn_festival"),
+    ]
+    kb = InlineKeyboardMarkup(chunk_buttons(btns, per_row=1))
+    await edit_section(query, caption=text, image_key="autumn_festival", reply_markup=kb)
+
+
+async def autumn_market_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    data = query.data
+    if data == "autumn_buy_feed":
+        if user["autumn_leaves"] < LEAVES_FOR_FEED:
+            await edit_section(query, caption="❌ Недостаточно листьев.", image_key="autumn_festival",
+                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+            return
+        update_user(uid, autumn_leaves=user["autumn_leaves"] - LEAVES_FOR_FEED, feed=user["feed"] + 1)
+        log_user_action(uid, f"Купил обычный корм за {LEAVES_FOR_FEED}🍁")
+        await edit_section(query, caption="✅ Обычный корм куплен!", image_key="autumn_festival",
+                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+        return
+    if data == "autumn_buy_autumn_feed":
+        if user["autumn_leaves"] < LEAVES_FOR_AUTUMN_FEED:
+            await edit_section(query, caption="❌ Недостаточно листьев.", image_key="autumn_festival",
+                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+            return
+        update_user(uid, autumn_leaves=user["autumn_leaves"] - LEAVES_FOR_AUTUMN_FEED, autumn_feed=user["autumn_feed"] + 1)
+        log_user_action(uid, f"Купил осенний корм за {LEAVES_FOR_AUTUMN_FEED}🍁")
+        await edit_section(query, caption="✅ Осенний корм куплен!", image_key="autumn_festival",
+                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+        return
+    if data in ("autumn_exchange_10", "autumn_exchange_50"):
+        amount = 10 if data.endswith("10") else 50
+        if user["autumn_leaves"] < amount:
+            await edit_section(query, caption="❌ Недостаточно листьев.", image_key="autumn_festival",
+                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+            return
+        coins_gain = amount * LEAF_TO_COIN
+        new_coins = min(user["coins"] + coins_gain, MAX_INT)
+        update_user(uid, autumn_leaves=user["autumn_leaves"] - amount, coins=new_coins, weekly_coins=user["weekly_coins"] + coins_gain)
+        log_user_action(uid, f"Обменял {amount}🍁 на {coins_gain}🪙")
+        await edit_section(query, caption=f"✅ Обменено {amount}🍁 на {format_num(coins_gain)}🪙.", image_key="autumn_festival",
+                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="autumn_market")]]))
+        return
 
 async def toggle_autumn_event(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(query.from_user.id):
@@ -3093,6 +3281,21 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "autumn_event":
         await autumn_event_info(query, context)
         return
+    if data == "autumn_festival":
+        await autumn_festival_menu(query, context)
+        return
+    if data == "autumn_collect":
+        await autumn_collect(query, context)
+        return
+    if data == "autumn_chest":
+        await autumn_chest(query, context)
+        return
+    if data == "autumn_market":
+        await autumn_market(query, context)
+        return
+    if data in ("autumn_buy_feed", "autumn_buy_autumn_feed", "autumn_exchange_10", "autumn_exchange_50"):
+        await autumn_market_action(query, context)
+        return
     if data == "admin_toggle_autumn":
         await toggle_autumn_event(query, context)
         return
@@ -3792,6 +3995,7 @@ def main() -> None:
     # Основные команды
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("pets", pets_command))
+    app.add_handler(CommandHandler("autumn", lambda u, c: u.message.reply_text("Откройте меню: 🍁 Осенний фестиваль в главном меню.")))
     # Групповые команды
     app.add_handler(
         CommandHandler("top", top_group_handler, filters.ChatType.GROUPS)
