@@ -2287,6 +2287,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
         InlineKeyboardButton("🍂 Обнулить осенние монеты", callback_data="admin_reset_autumn"),
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
         InlineKeyboardButton("⚔️ Управление кланами", callback_data="admin_clans"),
@@ -2454,6 +2455,52 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "admin_reset_autumn":
         _execute("UPDATE users SET autumn_feed = 0, autumn_bonus_end = 0")
         await edit_section(query, caption="✅ Осенние монеты всех игроков обнулены.", image_key="admin")
+        return
+    if data == "admin_bot_stats":
+        # Статистика бота
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cur.fetchone()["count"]
+        
+        cur.execute("SELECT COUNT(*) as count FROM users WHERE coins > 0")
+        active_users = cur.fetchone()["count"]
+        
+        cur.execute("SELECT SUM(coins) as total_coins FROM users")
+        total_coins = cur.fetchone()["total_coins"] or 0
+        
+        cur.execute("SELECT COUNT(*) as count FROM clans")
+        total_clans = cur.fetchone()["count"]
+        
+        cur.execute("SELECT COUNT(*) as count FROM clan_members")
+        clan_members = cur.fetchone()["count"]
+        
+        cur.execute("SELECT COUNT(*) as count FROM admin_logs")
+        total_logs = cur.fetchone()["count"]
+        
+        text = (
+            f"📊 Статистика бота:\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"⚡ Активных пользователей: {active_users}\n"
+            f"💰 Общее количество монет: {format_num(total_coins)}🪙\n"
+            f"🏰 Всего кланов: {total_clans}\n"
+            f"👥 Участников в кланах: {clan_members}\n"
+            f"📜 Всего записей в журнале: {total_logs}\n\n"
+            f"📈 Топ-5 игроков по монетам:"
+        )
+        
+        cur.execute("SELECT username, coins, user_id FROM users ORDER BY coins DESC LIMIT 5")
+        top_users = cur.fetchall()
+        for i, user in enumerate(top_users, 1):
+            name = user["username"] or f"Пользователь {user['user_id']}"
+            text += f"\n{i}. {name} — {format_num(user['coins'])}🪙"
+        
+        await edit_section(
+            query,
+            caption=text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]
+            ),
+        )
         return
     if data == "admin_clans":
         await admin_clans_panel(query, context)
