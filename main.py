@@ -346,6 +346,7 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "last_activity",
     }
     for col in needed:
         if col not in existing:
@@ -545,6 +546,27 @@ def get_user(user_id: int) -> sqlite3.Row:
             row = cur.fetchone()
             break
     return row
+
+
+def get_bot_stats() -> Tuple[int, int]:
+    """Возвращает статистику бота: (общее количество пользователей, активные за 24 часа)."""
+    # Общее количество пользователей
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()[0]
+    
+    # Активные за последние 24 часа
+    current_time = int(time.time())
+    day_ago = current_time - 86400  # 24 часа в секундах
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_activity > ?", (day_ago,))
+    active_users = cur.fetchone()[0]
+    
+    return total_users, active_users
+
+
+def update_user_activity(user_id: int) -> None:
+    """Обновляет время последней активности пользователя."""
+    current_time = int(time.time())
+    _execute("UPDATE users SET last_activity = ? WHERE user_id = ?", (current_time, user_id))
 
 
 def set_pet_last_fed(user_id: int, pet_field: str, timestamp: int) -> None:
@@ -2279,6 +2301,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
         return
     btns = [
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_stats"),
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
@@ -2307,6 +2330,18 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     if not is_admin(uid):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    if data == "admin_stats":
+        total_users, active_users = get_bot_stats()
+        stats_text = (
+            f"📊 Статистика бота\n\n"
+            f"👥 Всего пользователей: {format_num(total_users)}\n"
+            f"🟢 Активных за 24 часа: {format_num(active_users)}\n"
+            f"📈 Процент активности: {(active_users / total_users * 100):.1f}%" if total_users > 0 else "📈 Процент активности: 0%"
+        )
+        back_btn = InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel")
+        kb = InlineKeyboardMarkup([[back_btn]])
+        await edit_section(query, caption=stats_text, image_key="admin", reply_markup=kb)
         return
     if data == "admin_reset_top":
         _execute(
@@ -2998,6 +3033,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer()
     except Exception:
         pass
+    # Обновляем активность пользователя при любом взаимодействии с кнопками
+    update_user_activity(query.from_user.id)
     data = query.data
     # ------------------- Универсальная «Назад» -------------------
     if data == "back":
@@ -3190,6 +3227,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     txt = update.message.text if update.message else ""
     user = update.effective_user
     db_user = get_user(user.id)
+    # Обновляем активность пользователя
+    update_user_activity(user.id)
     # Проверяем, не наступил ли новый сезон
     check_and_reset_season()
     # Реферальный параметр: /start <ref_id>
@@ -3224,6 +3263,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает все текстовые сообщения, не являющиеся командами."""
     user = update.effective_user
     txt = update.message.text if update.message else ""
+    # Обновляем активность пользователя при отправке сообщений
+    update_user_activity(user.id)
 
     # ------------------- Рассылка (админ) -------------------
     if context.user_data.get("awaiting_broadcast"):
