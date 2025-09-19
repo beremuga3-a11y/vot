@@ -1781,6 +1781,65 @@ async def task_click(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         reputation=user["reputation"] + 1,
         click_reward_last=int(time.time()),
     )
+
+
+# ----------------------------------------------------------------------
+#   Задание: Подписка на канал (проверка подписки)
+# ----------------------------------------------------------------------
+async def task_sub_channel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    # Проверяем подписку
+    try:
+        member = await context.bot.get_chat_member(CHANNEL_ID, uid)
+        is_subscribed = member.status in ("member", "administrator", "creator")
+    except Exception:
+        is_subscribed = False
+
+    if not is_subscribed:
+        # Просим подписаться и вернуться, фикс: корректная f-строка с переносом строки
+        await edit_section(
+            query,
+            caption=f"Подпишитесь на канал и вернитесь:\n{CHANNEL_LINK}",
+            image_key="coins",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🔄 Проверить", callback_data="task_sub_channel")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")],
+                ]
+            ),
+        )
+        return
+
+    # Уже подписан: выдаём награду один раз
+    if user["subscribe_claimed"]:
+        await edit_section(
+            query,
+            caption="✅ Подписка уже подтверждена. Награда была выдана ранее.",
+            image_key="coins",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+            ),
+        )
+        return
+
+    reward = 500
+    update_user(
+        uid,
+        coins=min(user["coins"] + reward, MAX_INT),
+        weekly_coins=user["weekly_coins"] + reward,
+        reputation=user["reputation"] + 1,
+        subscribe_claimed=1,
+    )
+    log_user_action(uid, f"Подтвердил подписку на канал, награда {reward}🪙")
+    await edit_section(
+        query,
+        caption=f"🎉 Подписка подтверждена! Вы получили {format_num(reward)}🪙.",
+        image_key="coins",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="get_coins")]]
+        ),
+    )
     log_user_action(uid, f"Кликнул и получил {reward}🪙")
     await edit_section(
         query,
@@ -3049,6 +3108,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "task_referral":
         await task_referral(query, context)
+        return
+    if data == "task_sub_channel":
+        await task_sub_channel(query, context)
         return
     if data == "task_click":
         await task_click(query, context)
