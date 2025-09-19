@@ -1265,7 +1265,6 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
-        InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
         InlineKeyboardButton("🏆 Достижения", callback_data="achievements"),
         InlineKeyboardButton("🛠️ Техподдержка", callback_data="support"),
     ]
