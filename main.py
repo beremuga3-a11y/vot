@@ -346,6 +346,7 @@ def ensure_user_columns() -> None:
         "chat_claimed",
         "click_reward_last",
         "referred_by",
+        "created_at",
     }
     for col in needed:
         if col not in existing:
@@ -534,7 +535,8 @@ def get_user(user_id: int) -> sqlite3.Row:
     cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
     if not row:
-        _execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+        current_time = int(time.time())
+        _execute("INSERT INTO users (user_id, created_at) VALUES (?, ?)", (user_id, current_time))
         cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
     # «Летучее» добавление новых колонок, если они вдруг появятся позже
@@ -2108,6 +2110,27 @@ def delete_promo(code: str) -> None:
     _execute("DELETE FROM promo_codes WHERE code = ?", (code,))
 
 
+def get_bot_statistics() -> Tuple[int, int, int]:
+    """Возвращает статистику бота: (общее количество игроков, за 24 часа, за час)"""
+    current_time = int(time.time())
+    
+    # Общее количество игроков
+    cur.execute("SELECT COUNT(*) as total FROM users")
+    total_users = cur.fetchone()["total"]
+    
+    # Игроки за последние 24 часа (86400 секунд)
+    day_ago = current_time - 86400
+    cur.execute("SELECT COUNT(*) as day_count FROM users WHERE created_at > ? AND created_at > 0", (day_ago,))
+    day_users = cur.fetchone()["day_count"]
+    
+    # Игроки за последний час (3600 секунд)
+    hour_ago = current_time - 3600
+    cur.execute("SELECT COUNT(*) as hour_count FROM users WHERE created_at > ? AND created_at > 0", (hour_ago,))
+    hour_users = cur.fetchone()["hour_count"]
+    
+    return total_users, day_users, hour_users
+
+
 async def promo_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать пользователю кнопку ввода кода."""
     await edit_section(
@@ -2279,6 +2302,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
         return
     btns = [
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_statistics"),
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
@@ -2307,6 +2331,26 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     if not is_admin(uid):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    if data == "admin_statistics":
+        total_users, day_users, hour_users = get_bot_statistics()
+        stats_text = (
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"👥 <b>Общее количество игроков:</b> {format_num(total_users)}\n"
+            f"📅 <b>Игроки за последние 24 часа:</b> {format_num(day_users)}\n"
+            f"⏰ <b>Игроки за последний час:</b> {format_num(hour_users)}\n\n"
+            f"🔄 <i>Обновлено: {time.strftime('%d.%m.%Y %H:%M:%S')}</i>"
+        )
+        btns = [
+            InlineKeyboardButton("🔄 Обновить", callback_data="admin_statistics"),
+            InlineKeyboardButton("⬅️ Назад", callback_data="admin"),
+        ]
+        await edit_section(
+            query,
+            caption=stats_text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(chunk_buttons(btns, per_row=2)),
+        )
         return
     if data == "admin_reset_top":
         _execute(
