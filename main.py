@@ -1265,7 +1265,8 @@ def build_main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🎰 Казино", callback_data="casino_info"),
         InlineKeyboardButton("🎟️ Промокоды", callback_data="promo"),
         InlineKeyboardButton("🍂 Осеннее событие", callback_data="autumn_event"),
-        InlineKeyboardButton("⚔️ Кланы", callback_data="clans"),
+        InlineKeyboardButton("🏆 Достижения", callback_data="achievements"),
+        InlineKeyboardButton("🛠️ Техподдержка", callback_data="support"),
     ]
     rows.extend(chunk_buttons(other, per_row=3))
     if is_admin(user_id):
@@ -1316,6 +1317,98 @@ async def about_section(query) -> None:
         query,
         caption=text,
         image_key="about",
+        reply_markup=InlineKeyboardMarkup([[btn]]),
+    )
+
+
+# ----------------------------------------------------------------------
+#   Техподдержка
+# ----------------------------------------------------------------------
+async def support_section(query) -> None:
+    text = (
+        "🛠️ Техподдержка\n\n"
+        "Если у вас возникли проблемы с ботом или есть вопросы, "
+        "обратитесь к нам:\n\n"
+        f"💬 Чат поддержки: {CHAT_LINK}\n"
+        f"📢 Канал с новостями: {CHANNEL_LINK}\n\n"
+        "Мы постараемся помочь вам как можно быстрее! ⚡"
+    )
+    btn = InlineKeyboardButton("⬅️ Назад", callback_data="back")
+    await edit_section(
+        query,
+        caption=text,
+        image_key="admin",
+        reply_markup=InlineKeyboardMarkup([[btn]]),
+    )
+
+
+# ----------------------------------------------------------------------
+#   Достижения
+# ----------------------------------------------------------------------
+async def achievements_section(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    user = get_user(uid)
+    
+    # Список достижений
+    achievements = [
+        {
+            "name": "🐣 Первые шаги",
+            "description": "Купить первое животное",
+            "condition": lambda u: u["chickens"] > 0 or u["cows"] > 0 or u["pigs"] > 0,
+            "reward": "100 монет"
+        },
+        {
+            "name": "💰 Первые деньги",
+            "description": "Накопить 1000 монет",
+            "condition": lambda u: u["coins"] >= 1000,
+            "reward": "200 монет"
+        },
+        {
+            "name": "🏆 Богач",
+            "description": "Накопить 10000 монет",
+            "condition": lambda u: u["coins"] >= 10000,
+            "reward": "500 монет"
+        },
+        {
+            "name": "🐄 Молочный магнат",
+            "description": "Купить 10 коров",
+            "condition": lambda u: u["cows"] >= 10,
+            "reward": "300 монет"
+        },
+        {
+            "name": "🐷 Свиновод",
+            "description": "Купить 10 свиней",
+            "condition": lambda u: u["pigs"] >= 10,
+            "reward": "300 монет"
+        },
+        {
+            "name": "🐔 Птицевод",
+            "description": "Купить 20 кур",
+            "condition": lambda u: u["chickens"] >= 20,
+            "reward": "250 монет"
+        }
+    ]
+    
+    text = "🏆 Достижения\n\n"
+    completed_count = 0
+    
+    for achievement in achievements:
+        if achievement["condition"](user):
+            text += f"✅ {achievement['name']}\n"
+            text += f"   {achievement['description']}\n"
+            text += f"   Награда: {achievement['reward']}\n\n"
+            completed_count += 1
+        else:
+            text += f"⏳ {achievement['name']}\n"
+            text += f"   {achievement['description']}\n\n"
+    
+    text += f"Выполнено: {completed_count}/{len(achievements)}"
+    
+    btn = InlineKeyboardButton("⬅️ Назад", callback_data="back")
+    await edit_section(
+        query,
+        caption=text,
+        image_key="admin",
         reply_markup=InlineKeyboardMarkup([[btn]]),
     )
 
@@ -3006,6 +3099,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ------------------- О боте -------------------
     if data == "about":
         await about_section(query)
+        return
+    # ------------------- Техподдержка -------------------
+    if data == "support":
+        await support_section(query)
+        return
+    # ------------------- Достижения -------------------
+    if data == "achievements":
+        await achievements_section(query, context)
         return
     # ------------------- Моя ферма -------------------
     if data == "farm":
