@@ -2282,6 +2282,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
+        InlineKeyboardButton("📈 Статистика бота", callback_data="admin_bot_stats"),
         InlineKeyboardButton("🕷️ Выдать паука‑секрета", callback_data="admin_give_spider"),
         InlineKeyboardButton("💰 Выдать монеты", callback_data="admin_set_coins"),
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
@@ -2333,6 +2334,53 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_key="admin",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Отмена", callback_data="back")]]
+            ),
+        )
+        return
+    if data == "admin_bot_stats":
+        # Собираем базовую статистику бота
+        cur.execute("SELECT COUNT(*) AS cnt FROM users")
+        users_cnt = cur.fetchone()["cnt"]
+        cur.execute("SELECT SUM(coins) AS s FROM users")
+        coins_sum_row = cur.fetchone()
+        coins_sum = coins_sum_row["s"] or 0
+        # Подсчёт общего количества питомцев (сумма всех питомцев по всем пользователям)
+        total_pets = 0
+        for field, *_ in ANIMAL_CONFIG:
+            try:
+                cur.execute(f"SELECT SUM({field}) AS s FROM users")
+                row = cur.fetchone()
+                total_pets += (row["s"] or 0)
+            except Exception:
+                # На случай, если колонка отсутствует у старых баз
+                continue
+        # Кол-во записей в журнале и промокодов
+        cur.execute("SELECT COUNT(*) AS cnt FROM admin_logs")
+        logs_cnt = cur.fetchone()["cnt"]
+        cur.execute("SELECT COUNT(*) AS cnt FROM promo_codes")
+        promos_cnt = cur.fetchone()["cnt"]
+        # Кланы
+        cur.execute("SELECT COUNT(*) AS cnt FROM clans")
+        clans_cnt = cur.fetchone()["cnt"]
+        cur.execute("SELECT COUNT(*) AS cnt FROM clan_members")
+        clan_members_cnt = cur.fetchone()["cnt"]
+
+        text = (
+            "📈 Статистика бота\n\n"
+            f"• Пользователей: {format_num(users_cnt)}\n"
+            f"• Сумма монет у всех: {format_num(coins_sum)}🪙\n"
+            f"• Всего питомцев (суммарно): {format_num(total_pets)}\n"
+            f"• Записей в журнале: {format_num(logs_cnt)}\n"
+            f"• Промокодов: {format_num(promos_cnt)}\n"
+            f"• Кланов: {format_num(clans_cnt)}\n"
+            f"• Участников кланов: {format_num(clan_members_cnt)}"
+        )
+        await edit_section(
+            query,
+            caption=text,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
             ),
         )
         return
@@ -2526,7 +2574,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {(m['username'] or ('ID' + str(m['user_id'])))} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3383,7 +3431,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            display_name = member['username'] or ('ID' + str(member['user_id']))
+            text += f"{i}. {display_name}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
