@@ -2526,7 +2526,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {(m['username'] or f'ID{m['user_id']}')} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3602,7 +3602,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ------------------- Трейд (упрощённый пример) -------------------
     if txt.lower().startswith("/trade"):
-        await start_trade(query, context)   # функция start_trade реализована ниже
+        context.user_data["trade_state"] = {"step": 1}
+        await update.message.reply_photo(
+            MAIN_MENU_IMG,
+            caption="🤝 Трейд: введите ID получателя (user_id).",
+        )
         return
 
     # ------------------- Любой другой текст -------------------
