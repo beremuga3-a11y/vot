@@ -499,6 +499,73 @@ def log_user_action(user_id: int, action: str) -> None:
         log.error(f"Ошибка записи в журнал: {e}")
 
 
+def get_lost_pets_last_48h() -> List[Tuple[int, str, int]]:
+    """Возвращает список потерянных питомцев за последние 48 часов.
+    
+    Returns:
+        List[Tuple[int, str, int]]: Список кортежей (user_id, pet_field, timestamp)
+    """
+    # 48 часов в секундах
+    time_48h_ago = int(time.time()) - (48 * 3600)
+    
+    # Ищем записи в логах о потере питомцев за последние 48 часов
+    cur.execute(
+        "SELECT user_id, action, ts FROM admin_logs WHERE action LIKE '%Потеряно всех%из‑за голода%' AND ts >= ? ORDER BY ts DESC",
+        (time_48h_ago,)
+    )
+    
+    lost_pets = []
+    for user_id, action, timestamp in cur.fetchall():
+        # Извлекаем название питомца из строки "Потеряно всех {pet_field} из‑за голода"
+        if "Потеряно всех" in action and "из‑за голода" in action:
+            pet_field = action.replace("Потеряно всех ", "").replace(" из‑за голода", "")
+            lost_pets.append((user_id, pet_field, timestamp))
+    
+    return lost_pets
+
+
+def restore_pets_for_all_users() -> Tuple[int, int]:
+    """Восстанавливает питомцев для всех игроков, которые потеряли их за последние 48 часов.
+    
+    Returns:
+        Tuple[int, int]: (количество восстановленных пользователей, общее количество восстановленных питомцев)
+    """
+    lost_pets = get_lost_pets_last_48h()
+    
+    if not lost_pets:
+        return 0, 0
+    
+    restored_users = set()
+    total_restored_pets = 0
+    
+    # Группируем по пользователям
+    user_pets = {}
+    for user_id, pet_field, timestamp in lost_pets:
+        if user_id not in user_pets:
+            user_pets[user_id] = []
+        user_pets[user_id].append((pet_field, timestamp))
+    
+    for user_id, pets_info in user_pets.items():
+        user = get_user(user_id)
+        restored_count = 0
+        
+        for pet_field, timestamp in pets_info:
+            # Проверяем, что у пользователя действительно 0 питомцев этого типа
+            if user[pet_field] == 0:
+                # Восстанавливаем 1 питомца (можно изменить логику восстановления)
+                update_user(user_id, **{pet_field: 1})
+                # Устанавливаем время последнего кормления
+                set_pet_last_fed(user_id, pet_field, int(time.time()))
+                restored_count += 1
+                log_user_action(user_id, f"Админ восстановил {pet_field} (потерян {timestamp})")
+        
+        if restored_count > 0:
+            restored_users.add(user_id)
+            total_restored_pets += restored_count
+    
+    return len(restored_users), total_restored_pets
+
+
 # ----------------------------------------------------------------------
 #   Утилиты
 # ----------------------------------------------------------------------
@@ -2286,6 +2353,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("💰 Выдать монеты", callback_data="admin_set_coins"),
         InlineKeyboardButton("➕ Добавить монеты", callback_data="admin_add_coins"),
         InlineKeyboardButton("🍂 Обнулить осенние монеты", callback_data="admin_reset_autumn"),
+        InlineKeyboardButton("🐾 Восстановить питомцев", callback_data="admin_restore_pets"),
         InlineKeyboardButton("📜 Журнал действий", callback_data="admin_view_logs"),
         InlineKeyboardButton("🎟️ Создать промокод", callback_data="admin_create_promo"),
         InlineKeyboardButton("🍂 Переключить осеннее событие", callback_data="admin_toggle_autumn"),
@@ -2511,6 +2579,67 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             ),
         )
         return
+    if data == "admin_restore_pets":
+        # Получаем статистику потерянных питомцев
+        lost_pets = get_lost_pets_last_48h()
+        if not lost_pets:
+            await edit_section(
+                query, 
+                caption="✅ За последние 48 часов никто не терял питомцев от голода.", 
+                image_key="admin"
+            )
+            return
+        
+        # Показываем статистику и запрашиваем подтверждение
+        unique_users = len(set(pet[0] for pet in lost_pets))
+        total_pets = len(lost_pets)
+        
+        caption = (
+            f"🐾 Восстановление питомцев\n\n"
+            f"📊 Статистика за последние 48 часов:\n"
+            f"• Пострадавших игроков: {unique_users}\n"
+            f"• Потерянных питомцев: {total_pets}\n\n"
+            f"⚠️ Восстановление вернёт по 1 питомцу каждого типа,\n"
+            f"который был потерян от голода.\n\n"
+            f"Продолжить восстановление?"
+        )
+        
+        btns = [
+            InlineKeyboardButton("✅ Да, восстановить", callback_data="admin_restore_pets_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="admin"),
+        ]
+        
+        await edit_section(
+            query,
+            caption=caption,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup([btns]),
+        )
+        return
+    if data == "admin_restore_pets_confirm":
+        # Выполняем восстановление
+        restored_users, restored_pets = restore_pets_for_all_users()
+        
+        if restored_users == 0:
+            caption = "✅ Нет питомцев для восстановления."
+        else:
+            caption = (
+                f"✅ Восстановление завершено!\n\n"
+                f"📊 Результат:\n"
+                f"• Восстановлено игроков: {restored_users}\n"
+                f"• Восстановлено питомцев: {restored_pets}\n\n"
+                f"Все действия записаны в журнал."
+            )
+        
+        await edit_section(
+            query,
+            caption=caption,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            ),
+        )
+        return
     await edit_section(query, caption="❓ Неизвестная команда.", image_key="admin")
 
 
@@ -2526,7 +2655,7 @@ async def clans_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Пользователь уже в клане
         members = get_clan_members(user_clan["id"])
         member_text = "\n".join([
-            f"👤 {['username'] or f'ID{m[\"user_id\"]}'} ({m['role']}) - {m['contribution']} вклада"
+            f"👤 {m.get('username') or 'ID' + str(m['user_id'])} ({m['role']}) - {m['contribution']} вклада"
             for m in members[:10]  # Показываем только первых 10
         ])
         
@@ -3383,7 +3512,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         text = f"👥 Участники клана '{clan['name']}':\n\n"
         for i, member in enumerate(members, 1):
-            text += f"{i}. {member['username'] or f'ID{member[\"user_id\"]}'}\n"
+            text += f"{i}. {member.get('username') or 'ID' + str(member['user_id'])}\n"
             text += f"   Роль: {member['role']}\n"
             text += f"   Вклад: {member['contribution']}\n"
             text += f"   Присоединился: {time.strftime('%d.%m.%Y', time.localtime(member['joined_at']))}\n\n"
