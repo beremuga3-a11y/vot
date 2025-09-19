@@ -499,6 +499,33 @@ def log_user_action(user_id: int, action: str) -> None:
         log.error(f"Ошибка записи в журнал: {e}")
 
 
+def get_bot_statistics() -> Tuple[int, int, int]:
+    """Возвращает статистику бота: (всего игроков, игроков за 24 часа, игроков за час)."""
+    current_time = int(time.time())
+    
+    # Всего игроков
+    cur.execute("SELECT COUNT(DISTINCT user_id) as total FROM users")
+    total_players = cur.fetchone()["total"]
+    
+    # Игроки за 24 часа (последние 24 часа)
+    day_ago = current_time - 86400  # 24 часа в секундах
+    cur.execute(
+        "SELECT COUNT(DISTINCT user_id) as day_count FROM admin_logs WHERE ts >= ?",
+        (day_ago,)
+    )
+    day_players = cur.fetchone()["day_count"]
+    
+    # Игроки за час (последний час)
+    hour_ago = current_time - 3600  # 1 час в секундах
+    cur.execute(
+        "SELECT COUNT(DISTINCT user_id) as hour_count FROM admin_logs WHERE ts >= ?",
+        (hour_ago,)
+    )
+    hour_players = cur.fetchone()["hour_count"]
+    
+    return total_players, day_players, hour_players
+
+
 # ----------------------------------------------------------------------
 #   Утилиты
 # ----------------------------------------------------------------------
@@ -2279,6 +2306,7 @@ async def admin_panel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
         return
     btns = [
+        InlineKeyboardButton("📊 Статистика бота", callback_data="admin_statistics"),
         InlineKeyboardButton("🔄 Сброс топа", callback_data="admin_reset_top"),
         InlineKeyboardButton("🔁 Сброс всех аккаунтов", callback_data="admin_reset_all"),
         InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
@@ -2307,6 +2335,23 @@ async def admin_actions(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = query.from_user.id
     if not is_admin(uid):
         await edit_section(query, caption="❌ Доступ запрещён.", image_key="admin")
+        return
+    if data == "admin_statistics":
+        total_players, day_players, hour_players = get_bot_statistics()
+        caption = (
+            "📊 Статистика бота\n\n"
+            f"👥 Всего игроков: {format_num(total_players)}\n"
+            f"📅 Игроков за 24 часа: {format_num(day_players)}\n"
+            f"⏰ Игроков за час: {format_num(hour_players)}"
+        )
+        await edit_section(
+            query,
+            caption=caption,
+            image_key="admin",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]
+            ),
+        )
         return
     if data == "admin_reset_top":
         _execute(
